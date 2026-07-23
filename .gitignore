@@ -1,0 +1,13 @@
+*.gem
+*.rbc
+.bundle
+.coverage
+.idea
+.rake_tasks
+.sassc
+.svn
+DS_Store
+Gemfile.lock
+log/
+tmp/
+vendor/bundle
