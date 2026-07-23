@@ -127,6 +127,20 @@ module Ask
         @data.dig(:session, :timeout) || DEFAULTS.dig(:session, :timeout)
       end
 
+      # State persistence configuration.
+      # Returns nil if no state config is set (use in-memory defaults).
+      def state_config
+        @data[:state]
+      end
+
+      # Path for SQLite state database (if configured).
+      def state_sqlite_path
+        cfg = state_config
+        return nil unless cfg
+
+        cfg[:sqlite_path] || cfg["sqlite_path"] || cfg[:path] || cfg["path"]
+      end
+
       # Whether debug logging is enabled.
       def debug?
         ENV["DEBUG"] == "1"

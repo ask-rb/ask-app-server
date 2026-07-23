@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "fileutils"
+
 module Ask
   module AppServer
     # CLI for the ask-app-server command.
@@ -56,8 +58,12 @@ module Ask
         end
 
         # Build the session manager with config values
+        store = build_state_store(config)
         session_manager = SessionManager.new(
-          permission_mode: config.permission_mode
+          store: store,
+          permission_mode: config.permission_mode,
+          blocked_tools: config.blocked_tools,
+          permission_timeout: config.permission_timeout
         )
 
         # Start the server
@@ -79,6 +85,24 @@ module Ask
       end
 
       private
+
+      def build_state_store(config)
+        sqlite_path = config.state_sqlite_path
+        return nil unless sqlite_path
+
+        require "ask/state/providers/sqlite"
+
+        dir = File.dirname(File.expand_path(sqlite_path))
+        FileUtils.mkdir_p(dir) unless File.directory?(dir)
+
+        state = Ask::State::Providers::SQLite.new(path: sqlite_path)
+        $stderr.puts "[ask-app-server] Using SQLite state store: #{sqlite_path}" if config.debug?
+        Ask::AppServer::SessionStore.new(state: state)
+      rescue => e
+        $stderr.puts "[ask-app-server] Warning: Could not initialize SQLite state: #{e.message}"
+        $stderr.puts "[ask-app-server] Falling back to in-memory state store."
+        nil
+      end
 
       def show_help
         puts <<~HELP
