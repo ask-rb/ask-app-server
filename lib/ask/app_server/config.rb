@@ -13,13 +13,13 @@ module Ask
     #   3. ~/.ask-app-server/config.json (user-global)
     #
     # Environment variable overrides:
-    #   ASK_APP_SERVER_MODEL       — model identifier
+    #   ASK_APP_SERVER_MODEL       — model identifier (e.g., "opencode_go/deepseek-v4-flash")
     #   ASK_APP_SERVER_PERMISSIONS — permission mode (on_request, never)
     #   DEBUG                      — debug logging
     #
     # Example config file (~/.ask-app-server/config.json):
     #   {
-    #     "model": "claude-sonnet-4",
+    #     "model": "opencode_go/deepseek-v4-flash",
     #     "tools": ["bash", "read", "write", "edit", "glob", "grep"],
     #     "permissions": {
     #       "mode": "on_request",
@@ -27,13 +27,18 @@ module Ask
     #       "timeout": 300
     #     },
     #     "system_prompt": "You are a helpful AI coding assistant.",
-    #     "session": {
-    #       "timeout": 600
+    #     "session": { "timeout": 600 },
+    #     "custom_models": {
+    #       "deepseek-v4-flash": {
+    #         "provider": "opencode_go",
+    #         "context": 1000000,
+    #         "output": 384000
+    #       }
     #     }
     #   }
     class Config
       DEFAULTS = {
-        model: "gpt-4o",
+        model: "opencode_go/deepseek-v4-flash",
         tools: %w[bash read write edit glob grep].freeze,
         permissions: {
           mode: :on_request,
@@ -43,7 +48,8 @@ module Ask
         system_prompt: nil,
         session: {
           timeout: 600
-        }.freeze
+        }.freeze,
+        custom_models: {}.freeze
       }.freeze
 
       CONFIG_FILE_PATHS = [
@@ -57,11 +63,34 @@ module Ask
       def initialize(config_path: nil)
         @source_path = nil
         @data = load_config(config_path)
+        @registered = false
       end
 
-      # Resolved model identifier.
+      # Resolved model identifier (may include provider prefix).
       def model
         ENV.fetch("ASK_APP_SERVER_MODEL", @data[:model])
+      end
+
+      # Parse model into [provider, model_id].
+      # Supports "provider/model" format and bare model names.
+      def parsed_model
+        raw = model
+        if raw.include?("/")
+          parts = raw.split("/", 2)
+          [parts[0], parts[1]]
+        else
+          [nil, raw]
+        end
+      end
+
+      # The model ID (without provider prefix).
+      def model_id
+        parsed_model[1]
+      end
+
+      # The provider slug (nil if not specified).
+      def model_provider
+        parsed_model[0]
       end
 
       # List of tool names to load.
@@ -103,10 +132,49 @@ module Ask
         ENV["DEBUG"] == "1"
       end
 
+      # Custom model definitions from config.
+      def custom_models
+        @data[:custom_models] || {}
+      end
+
+      # Register custom models into Ask::ModelCatalog so ask-agent can find them.
+      # Safe to call multiple times — models are registered only once.
+      def register_models!
+        return if @registered
+        @registered = true
+
+        custom_models.each do |model_id, cfg|
+          provider = cfg[:provider] || cfg["provider"]
+          context = cfg[:context] || cfg["context"] || 4096
+          output = cfg[:output] || cfg["output"] || 4096
+
+          # Build a ModelInfo-compatible struct and register it
+          model_info = OpenStruct.new(
+            id: model_id.to_s,
+            provider: provider.to_s,
+            chat?: true,
+            context: context,
+            output: output
+          )
+
+          # Use the singleton's register if available
+          if Ask::ModelCatalog.respond_to?(:instance)
+            catalog = Ask::ModelCatalog.instance
+            catalog.register(model_info) if catalog.respond_to?(:register)
+          end
+
+          if debug?
+            warn "[ask-app-server] Registered custom model: #{provider}/#{model_id} (#{context}ctx)"
+          end
+        end
+      end
+
       # All config as a hash (for display).
       def to_h
+        prov, mod = parsed_model
         {
-          model: model,
+          model: mod,
+          provider: prov,
           tools: tools,
           permissions: {
             mode: permission_mode,
@@ -115,6 +183,7 @@ module Ask
           },
           system_prompt: system_prompt,
           session: { timeout: session_timeout },
+          custom_models: custom_models.keys,
           source: source_path || "(defaults)"
         }
       end
@@ -128,7 +197,6 @@ module Ask
         @source_path = File.expand_path(path)
         raw = JSON.parse(File.read(@source_path))
 
-        # Deep merge with defaults
         merged = deep_merge(deep_copy(DEFAULTS), normalize_keys(raw))
         merged
       rescue JSON::ParserError => e
@@ -144,7 +212,6 @@ module Ask
         nil
       end
 
-      # Deep merge b into a (b values win).
       def deep_merge(a, b)
         a.merge(b) do |_key, old_val, new_val|
           if old_val.is_a?(Hash) && new_val.is_a?(Hash)
@@ -157,7 +224,6 @@ module Ask
         end
       end
 
-      # Deep copy a hash (for defaults that are frozen).
       def deep_copy(obj)
         case obj
         when Hash then obj.each_with_object({}) { |(k, v), h| h[k] = deep_copy(v) }
@@ -166,7 +232,6 @@ module Ask
         end
       end
 
-      # Convert string keys to symbols recursively.
       def normalize_keys(obj)
         case obj
         when Hash then obj.each_with_object({}) { |(k, v), h| h[k.to_sym] = normalize_keys(v) }

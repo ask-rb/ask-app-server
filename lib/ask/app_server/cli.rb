@@ -44,6 +44,9 @@ module Ask
         # Load configuration
         config = Config.new(config_path: config_path)
 
+        # Register custom models from config into the model catalog
+        config.register_models!
+
         $stdout.sync = true
         $stderr.sync = true
 

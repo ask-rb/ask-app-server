@@ -11,7 +11,7 @@ module Ask
       DEFAULT_TOOLS = %w[bash read write edit glob grep].freeze
 
       # Default model if none specified.
-      DEFAULT_MODEL = ENV.fetch("ASK_APP_SERVER_MODEL", "gpt-4o")
+      DEFAULT_MODEL = ENV.fetch("ASK_APP_SERVER_MODEL", "opencode_go/deepseek-v4-flash")
 
       attr_reader :store
       attr_reader :permission_mode
@@ -44,6 +44,10 @@ module Ask
       def create_session(workspace_path: nil, mode: nil, model: nil, tools: nil, system_prompt: nil)
         permission_mode = resolve_permission_mode(mode)
 
+        # Extract provider prefix from model string (e.g., "opencode_go/deepseek-v4-flash")
+        model_id, model_provider = parse_model_string(model || DEFAULT_MODEL)
+        model_for_agent = model_provider ? model_id : (model || DEFAULT_MODEL)
+
         # Create the permission handler if needed
         permission_handler = if permission_mode == :on_request
           handler_opts = { mode: :on_request }
@@ -59,7 +63,7 @@ module Ask
         hooks[:before_tool] = [permission_handler] if permission_handler
 
         adapter = AgentAdapter.new(
-          model: model || DEFAULT_MODEL,
+          model: model_for_agent,
           tools: tools || DEFAULT_TOOLS,
           system_prompt: system_prompt || build_default_system_prompt(workspace_path),
           agent_dir: workspace_path,
@@ -218,6 +222,15 @@ module Ask
         @_sid_counter ||= 0
         @_sid_counter += 1
         "_pending_#{@_sid_counter}"
+      end
+
+      # Parse a model string that may include a provider prefix.
+      # "opencode_go/deepseek-v4-flash" => ["deepseek-v4-flash", "opencode_go"]
+      # "gpt-4o" => ["gpt-4o", nil]
+      def parse_model_string(str)
+        return [str, nil] unless str&.include?("/")
+        parts = str.split("/", 2)
+        [parts[1], parts[0]]
       end
     end
   end

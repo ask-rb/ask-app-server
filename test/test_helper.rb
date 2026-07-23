@@ -19,6 +19,36 @@ require "stringio"
 require "minitest/autorun"
 require "mocha/minitest" if Gem.loaded_specs.key?("mocha")
 
+# Register default models needed for tests into the model catalog.
+# This ensures SessionManager's DEFAULT_MODEL can be resolved.
+module AskAppServerTestModels
+  def self.register_default_models!
+    catalog = Ask::ModelCatalog.instance
+    return unless catalog.respond_to?(:register)
+
+    models = [
+      { id: "deepseek-v4-flash", provider: "opencode_go", context: 1_000_000, output: 384_000 },
+      { id: "gpt-4o", provider: "openai", context: 128_000, output: 16_384 },
+      { id: "gpt-4o-mini", provider: "openai", context: 128_000, output: 16_384 },
+      { id: "claude-sonnet-4", provider: "anthropic", context: 200_000, output: 8_192 },
+      { id: "gemini-2.0-flash", provider: "google", context: 1_000_000, output: 8_192 }
+    ]
+
+    models.each do |m|
+      model = OpenStruct.new(
+        id: m[:id],
+        provider: m[:provider],
+        chat?: true,
+        context: m[:context],
+        output: m[:output]
+      )
+      catalog.register(model)
+    end
+  end
+end
+
+AskAppServerTestModels.register_default_models!
+
 module AppServerTestHelpers
   # Build a fake ask-agent session for testing the adapter.
   # Returns a mock that responds like Ask::Agent::Session.

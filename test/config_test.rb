@@ -5,9 +5,22 @@ require_relative "test_helper"
 class ConfigTest < Minitest::Test
   include AppServerTestHelpers
 
+  def setup
+    # Register a stub model so ModelCatalog doesn't blow up when tests
+    # reference deepseek-v4-flash
+    register_stub_model("deepseek-v4-flash", "opencode_go")
+  end
+
+  def teardown
+    # Clean up registered models after each test
+    cleanup_stub_models
+  end
+
   def test_defaults
     config = Ask::AppServer::Config.new
-    assert_equal "gpt-4o", config.model
+    assert_equal "opencode_go/deepseek-v4-flash", config.model
+    assert_equal "deepseek-v4-flash", config.model_id
+    assert_equal "opencode_go", config.model_provider
     assert_equal %w[bash read write edit glob grep], config.tools
     assert_equal :on_request, config.permission_mode
     assert_equal %w[write edit bash destroy], config.blocked_tools
@@ -15,6 +28,41 @@ class ConfigTest < Minitest::Test
     assert_equal 600, config.session_timeout
     assert_nil config.system_prompt
     refute config.debug?
+  end
+
+  def test_parsed_model_bare_name
+    config = Ask::AppServer::Config.new
+    # Override via env
+    original = ENV.delete("ASK_APP_SERVER_MODEL")
+    ENV["ASK_APP_SERVER_MODEL"] = "gpt-4o"
+    begin
+      assert_equal [nil, "gpt-4o"], config.parsed_model
+      assert_equal "gpt-4o", config.model_id
+      assert_nil config.model_provider
+    ensure
+      if original
+        ENV["ASK_APP_SERVER_MODEL"] = original
+      else
+        ENV.delete("ASK_APP_SERVER_MODEL")
+      end
+    end
+  end
+
+  def test_parsed_model_with_provider
+    config = Ask::AppServer::Config.new
+    original = ENV.delete("ASK_APP_SERVER_MODEL")
+    ENV["ASK_APP_SERVER_MODEL"] = "anthropic/claude-sonnet-4"
+    begin
+      assert_equal %w[anthropic claude-sonnet-4], config.parsed_model
+      assert_equal "claude-sonnet-4", config.model_id
+      assert_equal "anthropic", config.model_provider
+    ensure
+      if original
+        ENV["ASK_APP_SERVER_MODEL"] = original
+      else
+        ENV.delete("ASK_APP_SERVER_MODEL")
+      end
+    end
   end
 
   def test_env_var_overrides_model
@@ -66,7 +114,7 @@ class ConfigTest < Minitest::Test
     with_tempdir do |dir|
       config_path = File.join(dir, "config.json")
       File.write(config_path, JSON.pretty_generate({
-        model: "gemini-2.0-flash",
+        model: "gemini/gemini-2.0-flash",
         tools: ["bash", "read", "write"],
         permissions: {
           mode: "never",
@@ -78,7 +126,9 @@ class ConfigTest < Minitest::Test
       }))
 
       config = Ask::AppServer::Config.new(config_path: config_path)
-      assert_equal "gemini-2.0-flash", config.model
+      assert_equal "gemini/gemini-2.0-flash", config.model
+      assert_equal "gemini", config.model_provider
+      assert_equal "gemini-2.0-flash", config.model_id
       assert_equal %w[bash read write], config.tools
       assert_equal :never, config.permission_mode
       assert_equal %w[destroy], config.blocked_tools
@@ -110,7 +160,7 @@ class ConfigTest < Minitest::Test
 
       capture_io do
         config = Ask::AppServer::Config.new(config_path: config_path)
-        assert_equal "gpt-4o", config.model  # defaults
+        assert_equal "opencode_go/deepseek-v4-flash", config.model  # defaults
         assert config.source_path, "should still report source path even with bad json"
       end
     end
@@ -118,7 +168,7 @@ class ConfigTest < Minitest::Test
 
   def test_nonexistent_file_uses_defaults
     config = Ask::AppServer::Config.new(config_path: "/nonexistent/path/config.json")
-    assert_equal "gpt-4o", config.model
+    assert_equal "opencode_go/deepseek-v4-flash", config.model
     assert_nil config.source_path
   end
 
@@ -167,10 +217,85 @@ class ConfigTest < Minitest::Test
     config = Ask::AppServer::Config.new
     h = config.to_h
     assert h[:model]
+    assert h[:provider]
     assert h[:tools]
     assert h[:permissions]
     assert h.key?(:system_prompt)
     assert h[:session]
     assert h[:source]
+  end
+
+  # --- Custom models ---
+
+  def test_custom_models_from_config
+    with_tempdir do |dir|
+      config_path = File.join(dir, "custom_models.json")
+      File.write(config_path, JSON.pretty_generate({
+        model: "my_provider/my-model",
+        custom_models: {
+          "my-model": {
+            provider: "my_provider",
+            context: 32000,
+            output: 8000
+          }
+        }
+      }))
+
+      config = Ask::AppServer::Config.new(config_path: config_path)
+      assert_equal "my_provider/my-model", config.model
+
+      models = config.custom_models
+      assert models.key?(:'my-model') || models.key?("my-model"), "should have my-model"
+    end
+  end
+
+  def test_register_models!
+    with_tempdir do |dir|
+      config_path = File.join(dir, "register_test.json")
+      File.write(config_path, JSON.pretty_generate({
+        custom_models: {
+          "test-model-v1": {
+            provider: "opencode_go",
+            context: 1000000,
+            output: 384000
+          }
+        }
+      }))
+
+      config = Ask::AppServer::Config.new(config_path: config_path)
+      config.register_models!
+
+      # Should not raise
+      catalog = Ask::ModelCatalog.instance
+      model = catalog.find("test-model-v1")
+      assert model, "model should be registered"
+      assert_equal "opencode_go", model.provider
+    end
+  end
+
+  def test_register_models_safe_to_call_multiple_times
+    config = Ask::AppServer::Config.new
+    config.register_models!
+    config.register_models!  # Should not raise or duplicate
+    assert true
+  end
+
+  private
+
+  def register_stub_model(model_id, provider)
+    catalog = Ask::ModelCatalog.instance
+    model = OpenStruct.new(
+      id: model_id,
+      provider: provider,
+      chat?: true,
+      context: 4096,
+      output: 4096
+    )
+    catalog.register(model) if catalog.respond_to?(:register)
+  end
+
+  def cleanup_stub_models
+    # We can't easily remove models from the catalog, but since we register
+    # unique model IDs per test, this shouldn't cause issues.
   end
 end
