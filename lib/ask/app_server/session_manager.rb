@@ -15,10 +15,14 @@ module Ask
 
       attr_reader :store
       attr_reader :permission_mode
+      attr_reader :blocked_tools
+      attr_reader :permission_timeout
 
-      def initialize(store: nil, permission_mode: :on_request)
+      def initialize(store: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
         @store = store || SessionStore.new
         @permission_mode = permission_mode
+        @blocked_tools = blocked_tools
+        @permission_timeout = permission_timeout
         @permission_handlers = {}  # session_id => PermissionHandler
         @on_new_handler = nil  # callback for new permission handlers
         @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG || Logger::DEBUG : Logger::WARN)
@@ -42,7 +46,11 @@ module Ask
 
         # Create the permission handler if needed
         permission_handler = if permission_mode == :on_request
-          handler = PermissionHandler.new(mode: :on_request)
+          handler_opts = { mode: :on_request }
+          handler_opts[:blocked_tools] = @blocked_tools if @blocked_tools
+          handler_opts[:timeout] = @permission_timeout if @permission_timeout
+
+          handler = PermissionHandler.new(**handler_opts)
           @permission_handlers[session_id_cache] = handler if session_id_cache
           handler
         end

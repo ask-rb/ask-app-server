@@ -22,6 +22,7 @@ module Ask
       def initialize(session_manager: nil)
         @session_manager = session_manager || SessionManager.new
         @running = false
+        @started_at = nil
         @input_queue = Queue.new
         @response_handlers = {}  # outgoing request_id => Proc
         @outgoing_id = 0
@@ -36,6 +37,7 @@ module Ask
       # The main thread handles event pushing and shutdown.
       def start
         @running = true
+        @started_at = Time.now
 
         # Reader thread: reads NDJSON lines from stdin
         @reader = Thread.new do
@@ -141,6 +143,16 @@ module Ask
       end
 
       def register_default_handlers
+        # Ping — liveness check
+        handler("ping") do |_params, _id|
+          {
+            status: "ok",
+            uptime: @started_at ? (Time.now - @started_at).to_i : 0,
+            version: Ask::AppServer::VERSION,
+            sessions: @session_manager&.store&.count || 0
+          }
+        end
+
         # Initialize handshake
         handler("initialize") do |params, _id|
           {

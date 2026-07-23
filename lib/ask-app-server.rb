@@ -5,6 +5,7 @@ require "ask-tools-shell"
 
 require_relative "ask/app_server/version"
 require_relative "ask/app_server"
+require_relative "ask/app_server/config"
 require_relative "ask/app_server/event_translator"
 require_relative "ask/app_server/agent_adapter"
 require_relative "ask/app_server/permission_handler"

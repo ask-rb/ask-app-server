@@ -170,6 +170,38 @@ class ServerTest < Minitest::Test
     assert @output.string.empty? || @output.string.strip.empty?
   end
 
+  # --- Ping ---
+
+  def test_ping_returns_status
+    handle("ping", {}, id: 1)
+    response = read_response
+
+    assert response
+    assert_equal "ok", response.dig("result", "status")
+    assert response.dig("result", "version")
+    assert response.dig("result", "sessions")&.is_a?(Integer)
+  end
+
+  def test_ping_returns_uptime
+    handle("ping", {}, id: 1)
+    response = read_response
+
+    assert response
+    uptime = response.dig("result", "uptime")
+    assert uptime.is_a?(Integer), "uptime should be an integer"
+    assert_equal 0, uptime, "uptime should be 0 since server hasn't started"
+  end
+
+  def test_ping_with_active_session
+    create_test_session
+
+    handle("ping", {}, id: 1)
+    response = read_response
+
+    assert response
+    assert_equal 1, response.dig("result", "sessions"), "should report 1 active session"
+  end
+
   private
 
   def handle(method, params = {}, id: nil)
