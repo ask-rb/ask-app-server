@@ -14,34 +14,77 @@ module Ask
       DEFAULT_MODEL = ENV.fetch("ASK_APP_SERVER_MODEL", "gpt-4o")
 
       attr_reader :store
+      attr_reader :permission_mode
 
-      def initialize(store: nil)
+      def initialize(store: nil, permission_mode: :on_request)
         @store = store || SessionStore.new
-        @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG : Logger::WARN)
+        @permission_mode = permission_mode
+        @permission_handlers = {}  # session_id => PermissionHandler
+        @on_new_handler = nil  # callback for new permission handlers
+        @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG || Logger::DEBUG : Logger::WARN)
+      end
+
+      # Register a callback that fires for every new PermissionHandler created.
+      # The server uses this to wire its protocol sender callback.
+      def on_new_permission_handler(&block)
+        @on_new_handler = block
+      end
+
+      # Set the permission mode for new sessions.
+      def permission_mode=(mode)
+        @permission_mode = mode.to_sym
       end
 
       # Create a new session.
       # Returns the session ID.
       def create_session(workspace_path: nil, mode: nil, model: nil, tools: nil, system_prompt: nil)
+        permission_mode = resolve_permission_mode(mode)
+
+        # Create the permission handler if needed
+        permission_handler = if permission_mode == :on_request
+          handler = PermissionHandler.new(mode: :on_request)
+          @permission_handlers[session_id_cache] = handler if session_id_cache
+          handler
+        end
+
+        hooks = {}
+        hooks[:before_tool] = [permission_handler] if permission_handler
+
         adapter = AgentAdapter.new(
           model: model || DEFAULT_MODEL,
           tools: tools || DEFAULT_TOOLS,
           system_prompt: system_prompt || build_default_system_prompt(workspace_path),
-          agent_dir: workspace_path
+          agent_dir: workspace_path,
+          hooks: hooks
         )
 
         session_id = adapter.start_session
         @store.add(session_id, adapter)
 
-        @logger.info("Created session #{session_id} (model=#{model || DEFAULT_MODEL})")
+        # Register the permission handler by session ID
+        if permission_handler
+          @permission_handlers[session_id] = permission_handler
+          @on_new_handler&.call(permission_handler)
+        end
+
+        @logger.info("Created session #{session_id} (model=#{model || DEFAULT_MODEL}, permission_mode=#{permission_mode})")
 
         session_id
+      end
+
+      # Get the permission handler for a session, if any.
+      def permission_handler_for(session_id)
+        @permission_handlers[session_id]
       end
 
       # Remove a session.
       def destroy_session(session_id)
         adapter = @store.get(session_id)
         return false unless adapter
+
+        # Cancel any pending permission requests
+        handler = @permission_handlers.delete(session_id)
+        handler&.cancel_all!
 
         adapter.abort_turn! if adapter.running
         @store.remove(session_id)
@@ -60,11 +103,9 @@ module Ask
       end
 
       # Send a message to a session.
-      # If the session is busy, enqueues the message (mid-execution injection).
-      # Returns true if the message was accepted.
       def send_message(session_id, content)
         adapter = @store.get(session_id)
-        raise SessionNotFound, "Session #{session_id} not found" unless adapter
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
         if adapter.running
           @logger.info("Session #{session_id} busy, injecting message")
@@ -79,7 +120,7 @@ module Ask
       # Subscribe to a session's events.
       def subscribe(session_id, delivery_kind: "web-remote-replayable")
         adapter = @store.get(session_id)
-        raise SessionNotFound, "Session #{session_id} not found" unless adapter
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
         @store.subscribe(session_id, delivery_kind: delivery_kind)
         { subscribed: true, sessionId: session_id, deliveryKind: delivery_kind }
@@ -88,7 +129,7 @@ module Ask
       # Get events for a session after a sequence number.
       def get_events(session_id, after_seq:, limit: nil)
         adapter = @store.get(session_id)
-        raise SessionNotFound, "Session #{session_id} not found" unless adapter
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
         events = adapter.events_after(after_seq.to_i)
         events = events.first(limit) if limit && limit > 0
@@ -100,7 +141,7 @@ module Ask
         }
       end
 
-      # Read workspace state (model info, tools).
+      # Read workspace state.
       def read_workspace_state(session_id = nil)
         settings = {
           model: {
@@ -108,6 +149,9 @@ module Ask
               modelId: ENV.fetch("ASK_APP_SERVER_MODEL", DEFAULT_MODEL),
               providerId: resolve_provider_id
             }
+          },
+          permissions: {
+            mode: @permission_mode.to_s
           }
         }
 
@@ -128,7 +172,6 @@ module Ask
       end
 
       # Notify subscribers of new events.
-      # Called internally; returns events that should be pushed to the subscriber.
       def pending_notifications(session_id)
         adapter = @store.get(session_id)
         return [] unless adapter && subscribed?(session_id)
@@ -137,6 +180,14 @@ module Ask
       end
 
       private
+
+      def resolve_permission_mode(mode)
+        return :never if mode.to_s == "yolo"
+        return :never if mode.to_s == "plan"
+        return :on_request if mode.to_s == "build"
+        return :on_request if mode.to_s == "edit"
+        @permission_mode
+      end
 
       def build_default_system_prompt(workspace_path)
         parts = ["You are a helpful AI coding assistant. You can use shell commands and file operations to help the user."]
@@ -152,6 +203,13 @@ module Ask
         when /^gemini/ then "google"
         else "openai"
         end
+      end
+
+      # Temporary cache for session ID before it's created
+      def session_id_cache
+        @_sid_counter ||= 0
+        @_sid_counter += 1
+        "_pending_#{@_sid_counter}"
       end
     end
   end

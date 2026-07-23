@@ -39,6 +39,13 @@ module Ask
         # Start the server
         server = Server.new(session_manager: session_manager)
 
+        # Wire the server as the protocol sender for permission requests.
+        # Every time a new session is created with a PermissionHandler,
+        # the server registers its outgoing request callback.
+        session_manager.on_new_permission_handler do |handler|
+          server.register_permission_handler(handler)
+        end
+
         # Log startup info
         $stderr.puts "[ask-app-server] Starting v#{Ask::AppServer::VERSION} (model=#{model}, debug=#{debug_mode})" if debug_mode
 

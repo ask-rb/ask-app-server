@@ -15,16 +15,19 @@ module Ask
     #
     # Notifications (server → client):
     #   session/event, interaction/requestPermission, interaction/requestUserInput
+    #
+    # The server also handles incoming responses to its outgoing requests
+    # (e.g., client responses to interaction/requestPermission).
     class Server
       def initialize(session_manager: nil)
         @session_manager = session_manager || SessionManager.new
         @running = false
         @input_queue = Queue.new
-        @request_id = 0
-        @pending_requests = {}  # request_id => { method:, params:, start_time: }
+        @response_handlers = {}  # outgoing request_id => Proc
+        @outgoing_id = 0
         @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG : Logger::WARN)
 
-        # Register the protocol handlers
+        # Register the protocol method handlers
         @handlers = {}
         register_default_handlers
       end
@@ -62,7 +65,7 @@ module Ask
           end
         end
 
-        # Main loop: processes incoming requests
+        # Main loop: processes incoming messages
         while @running
           msg = @input_queue.pop
           break if msg.nil?
@@ -88,7 +91,54 @@ module Ask
         @running
       end
 
+      # Send an outgoing JSON-RPC request to the client.
+      # If a block is given, it will be called with (result, error) when
+      # the client responds.
+      def send_request(method, params, &block)
+        id = next_outgoing_id
+        @response_handlers[id] = block if block
+        write_line({ id: id, method: method, params: params })
+        id
+      end
+
+      # Register a PermissionHandler so the server can wire its protocol sender.
+      # The server will set up the handler's on_request callback to send
+      # interaction/requestPermission messages and route responses back.
+      def register_permission_handler(handler)
+        handler.on_request do |request_id, tool_name, arguments|
+          send_request("interaction/requestPermission", {
+            requestId: request_id,
+            toolName: tool_name,
+            input: arguments,
+            riskLevel: blocked_tool_risk_level(tool_name),
+            reason: "Tool '#{tool_name}' requires approval"
+          }) do |result, error|
+            if result
+              decision = result["decision"] || result[:decision] || "deny"
+              handler.handle_response(request_id, decision)
+            else
+              handler.handle_response(request_id, "deny", reason: error&.dig("message"))
+            end
+          end
+        end
+      end
+
       private
+
+      def next_outgoing_id
+        @outgoing_id += 1
+        # Use IDs starting from a high number to avoid collision with client IDs
+        10_000 + @outgoing_id
+      end
+
+      def blocked_tool_risk_level(tool_name)
+        case tool_name.to_s
+        when "bash" then "high"
+        when "write", "edit" then "medium"
+        when "destroy" then "critical"
+        else "medium"
+        end
+      end
 
       def register_default_handlers
         # Initialize handshake
@@ -99,7 +149,7 @@ module Ask
               sessionManagement: true,
               eventStreaming: true,
               midExecutionInjection: true,
-              permissions: false
+              permissions: true
             },
             serverInfo: {
               name: "ask-app-server",
@@ -149,7 +199,7 @@ module Ask
           raise InvalidRequest, "sessionId is required" unless session_id
 
           adapter = @session_manager.get(session_id)
-          raise SessionNotFound, "Session #{session_id} not found" unless adapter
+          raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
           {
             sessionId: session_id,
@@ -168,7 +218,6 @@ module Ask
 
           result = @session_manager.subscribe(session_id, delivery_kind: delivery_kind)
 
-          # If after_seq > 0, include snapshot of events since that sequence
           snapshot = if include_snapshot
             @session_manager.get_events(session_id, after_seq: after_seq)
           else
@@ -188,7 +237,6 @@ module Ask
 
           @session_manager.send_message(session_id, content.to_s)
 
-          # Return immediately; events flow via subscription notifications.
           { accepted: true, sessionId: session_id }
         end
 
@@ -207,7 +255,7 @@ module Ask
           raise InvalidRequest, "sessionId is required" unless session_id
 
           adapter = @session_manager.get(session_id)
-          raise SessionNotFound, "Session #{session_id} not found" unless adapter
+          raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
           adapter.abort_turn!
           { aborted: true, sessionId: session_id }
@@ -215,17 +263,16 @@ module Ask
 
         # Workspace: read state
         handler("workspace/readState") do |params, _id|
-          workspace = params["workspace"] || params[:workspace] || {}
-          workspace_path = workspace["workspacePath"] || workspace[:workspacePath]
-
           @session_manager.read_workspace_state
         end
 
-        # Interaction: respond to permission request
+        # Default handler for interaction/requestPermission
+        # This is both an incoming request from the client (to query current
+        # permission state) and the client may also respond to our outgoing
+        # permission requests via the response routing in handle_message.
         handler("interaction/requestPermission") do |params, _id|
-          # Permission requests come from the server to the client.
-          # This handler is for the client's response.
-          { handled: true }
+          # If the client sends this as a request, respond with current state
+          { mode: @session_manager.permission_mode, pending: false }
         end
       end
 
@@ -234,9 +281,22 @@ module Ask
       end
 
       def handle_message(msg)
+        id = msg["id"] || msg[:id]
+
+        # Check if this is a response to an outgoing request.
+        # A response has an id and a result (or error), but no method.
+        if id && !msg.key?("method") && !msg.key?(:method)
+          if msg.key?("result") || msg.key?(:result)
+            handle_incoming_response(id, msg["result"] || msg[:result])
+            return
+          elsif msg.key?("error") || msg.key?(:error)
+            handle_incoming_response(id, nil, msg["error"] || msg[:error])
+            return
+          end
+        end
+
         method = msg["method"] || msg[:method]
         params = msg["params"] || msg[:params] || {}
-        id = msg["id"] || msg[:id]
 
         unless method
           send_error(id, -32600, "Method not specified") if id
@@ -252,15 +312,24 @@ module Ask
         begin
           result = handler_block.call(params, id)
           send_result(id, result) if id
-        rescue SessionNotFound => e
+        rescue Ask::AppServer::SessionNotFound => e
           send_error(id, -32004, e.message) if id
-        rescue SessionAlreadyExists => e
+        rescue Ask::AppServer::SessionAlreadyExists => e
           send_error(id, -32005, e.message) if id
-        rescue InvalidRequest => e
+        rescue Ask::AppServer::InvalidRequest => e
           send_error(id, -32602, e.message) if id
         rescue => e
           @logger.error("Handler error for #{method}: #{e.message}")
           send_error(id, -32603, "Internal error: #{e.message}") if id
+        end
+      end
+
+      def handle_incoming_response(id, result, error = nil)
+        handler_block = @response_handlers.delete(id)
+        if handler_block
+          handler_block.call(result, error)
+        else
+          @logger.debug("No handler for response #{id}")
         end
       end
 
@@ -296,8 +365,7 @@ module Ask
           end
         end
       rescue => e
-        # Don't crash the push thread
-        @logger.error("Push error: #{e.message}") if ENV["DEBUG"]
+        @logger.debug("Push error: #{e.message}") if ENV["DEBUG"]
       end
     end
   end

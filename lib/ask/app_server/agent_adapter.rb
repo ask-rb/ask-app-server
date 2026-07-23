@@ -43,12 +43,18 @@ module Ask
       # Start a new ask-agent session.
       # Returns the session ID.
       def start_session
+        opts = @session_opts.dup
+
+        # Extract hooks from session opts and pass them to Session
+        hooks = opts.delete(:hooks) || {}
+
         @session = Ask::Agent::Session.new(
           model: @model,
           tools: @tools,
           system_prompt: @system_prompt,
           agent_dir: @agent_dir,
-          **@session_opts
+          hooks: hooks,
+          **opts
         )
         @session_id = @session.id
         @translator = EventTranslator.new(@session_id)
