@@ -87,16 +87,22 @@ module Ask
       private
 
       def build_state_store(config)
-        sqlite_path = config.state_sqlite_path
-        return nil unless sqlite_path
+        # Default path: ~/.ask-app-server/state.db
+        sqlite_path = config.state_sqlite_path || File.expand_path("~/.ask-app-server/state.db")
 
-        require "ask/state/providers/sqlite"
+        begin
+          require "sqlite3"
+          require "ask/state/providers/sqlite"
+        rescue LoadError
+          $stderr.puts "[ask-app-server] sqlite3 gem not available, using in-memory state store." if config.debug?
+          return nil
+        end
 
         dir = File.dirname(File.expand_path(sqlite_path))
         FileUtils.mkdir_p(dir) unless File.directory?(dir)
 
         state = Ask::State::Providers::SQLite.new(path: sqlite_path)
-        $stderr.puts "[ask-app-server] Using SQLite state store: #{sqlite_path}" if config.debug?
+        $stderr.puts "[ask-app-server] State store: #{sqlite_path}" if config.debug?
         Ask::AppServer::SessionStore.new(state: state)
       rescue => e
         $stderr.puts "[ask-app-server] Warning: Could not initialize SQLite state: #{e.message}"
