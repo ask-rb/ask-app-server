@@ -101,7 +101,7 @@ bundle exec rake test
 
 ## Full documentation
 
-The full ask-rb documentation lives at https://ask-rb.github.io/ask-docs. The [Gem reference](https://ask-rb.github.io/ask-docs/reference/gems) (Agent Infrastructure section) covers ask-app-server. API reference: https://ask-rb.github.io/ask-docs/reference/api.
+The full ask-rb documentation lives at https://ask-rb.github.io/ask-docs. The [App Server guide](https://ask-rb.github.io/ask-docs/core/app-server) covers the protocol, events, and configuration; the [Gem reference](https://ask-rb.github.io/ask-docs/reference/gems) (Agent Infrastructure section) lists this gem alongside ask-acp and ask-coding-providers.
 
 ## License
 
