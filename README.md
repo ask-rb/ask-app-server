@@ -2,13 +2,20 @@
 
 [![Gem Version](https://badge.fury.io/rb/ask-app-server.svg)](https://badge.fury.io/rb/ask-app-server)
 
-**JSON-RPC/stdio app-server for ask-rb agents.** Exposes `Ask::Agent::Session` behind the standard app-server protocol — the same interface OpenAI's Codex app-server uses to power its clients (including the Codex VS Code extension and the official `openai-codex` / `@openai/codex-sdk` SDKs).
+**JSON-RPC/stdio app-server for ask-rb agents.** Exposes `Ask::Agent::Session`
+behind the standard app-server protocol: a vendor-neutral interface for
+driving an agent as a service, with sessions, streamed events, approvals, and
+turn lifecycle. Any client that implements the protocol can drive your agent,
+and the client never needs to know it's talking to Ruby. The same protocol is
+what several coding agents use behind their own app-servers (OpenAI's Codex
+app-server is one well-known implementation); ask-app-server isn't an
+extension of any of them — it simply speaks the standard.
 
 ## What is this?
 
 `ask-app-server` turns an ask-rb agent into a **programmable service** that speaks JSON-RPC over stdio. Any client that can speak the app-server protocol can drive your agent:
 
-- **IDE extensions and editors** — the same interface that powers the Codex VS Code extension, over stdio or a socket
+- **IDE extensions and editors** — stream model deltas and tool events into an editor surface over stdio or a socket, the same way agent–editor integrations work today
 - **Custom chat UIs and desktop apps** — stream model deltas and tool events into your own interface
 - **Bots and assistants** — drive sessions programmatically from any runtime that can spawn a subprocess
 - **Headless automation** — CI/CD pipelines, batch processing, scriptable agent tasks
@@ -69,11 +76,12 @@ Event payloads are delivered as `session/event` notifications on subscribed sess
 
 ## Clients
 
-Any app-server client can connect — including OpenAI's official Codex SDKs
-(`openai-codex` for Python, `@openai/codex-sdk` for TypeScript), which spawn
-an app-server subprocess and drive it over stdio. Or write your own client in
-any language: the protocol is documented and the wire format is plain
-JSON-RPC over newline-delimited JSON.
+Any client that speaks the app-server protocol can connect — including
+existing app-server SDKs, such as OpenAI's `openai-codex` (Python) and
+`@openai/codex-sdk` (TypeScript), which spawn an app-server subprocess and
+drive it over stdio. Or write your own client in any language: the protocol
+is documented and the wire format is plain JSON-RPC over newline-delimited
+JSON.
 
 ## Configuration
 
