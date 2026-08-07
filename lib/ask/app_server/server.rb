@@ -274,6 +274,39 @@ module Ask
           { aborted: true, sessionId: session_id }
         end
 
+        # Artifacts: list the session's tool deliverables
+        handler("session/artifacts") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          adapter = @session_manager.get(session_id)
+          raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+          agent = adapter.session
+          raise InvalidRequest, "session has no artifact store (artifacts: not enabled)" unless agent.artifact_store
+
+          { artifacts: agent.artifacts }
+        end
+
+        # Artifact: fetch one (content for inline artifacts, uri for
+        # external binaries)
+        handler("session/artifact/get") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          artifact_id = params["artifactId"] || params[:artifactId]
+          raise InvalidRequest, "sessionId and artifactId are required" unless session_id && artifact_id
+
+          adapter = @session_manager.get(session_id)
+          raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+          agent = adapter.session
+          raise InvalidRequest, "session has no artifact store (artifacts: not enabled)" unless agent.artifact_store
+
+          record = agent.fetch_artifact(artifact_id)
+          raise InvalidRequest, "Artifact #{artifact_id} not found" unless record
+
+          { artifact: record }
+        end
+
         # Workspace: read state
         handler("workspace/readState") do |params, _id|
           @session_manager.read_workspace_state

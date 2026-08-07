@@ -226,4 +226,34 @@ class ServerTest < Minitest::Test
   def create_test_session
     @session_manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
   end
+
+  public
+
+  def test_session_artifacts_handlers
+    handle("session/create", { model: "gpt-4o" }, id: 1)
+    response = read_response
+    session_id = response.dig("result", "session", "sessionId")
+
+    # Enable artifacts on the underlying session (as artifacts: true would).
+    adapter = @session_manager.get(session_id)
+    agent = adapter.session
+    agent.instance_variable_set(:@artifact_store, Ask::Agent::ArtifactStore.new(state: Ask::State::Memory.new))
+    record = agent.artifact_store.store(agent.id, filename: "report.csv", mime_type: "text/csv", content: "a,b\n1,2\n")
+
+    handle("session/artifacts", { sessionId: session_id }, id: 2)
+    artifacts_response = read_response
+    assert_equal 1, artifacts_response.dig("result", "artifacts").size
+    assert_equal "report.csv", artifacts_response.dig("result", "artifacts", 0, "filename")
+    refute artifacts_response.dig("result", "artifacts", 0).key?("content")
+
+    handle("session/artifact/get", { sessionId: session_id, artifactId: record[:id] }, id: 3)
+    get_response = read_response
+    assert_equal "a,b\n1,2\n", get_response.dig("result", "artifact", "content")
+  end
+
+  def test_session_artifacts_requires_session
+    handle("session/artifacts", {}, id: 1)
+    response = read_response
+    assert response.dig("error")
+  end
 end
