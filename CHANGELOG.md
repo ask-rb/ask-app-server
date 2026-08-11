@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.0] - 2026-08-11
+
+### Added
+
+- **Unix-socket transport for multi-client attach** — `SocketServer`
+  (`ask-app-server --socket PATH` or `ASK_APP_SERVER_SOCKET`). Any number
+  of clients (terminal TUI, web console, bots) connect to the same host
+  and share sessions; each connection has its own reader thread, and
+  responses are routed back to the requesting connection. The stdio
+  transport runs alongside.
+- **Per-connection event delivery cursors** — the host no longer drains a
+  shared buffer. Each `Connection` tracks the last delivered seq per
+  subscribed session; `session/subscribe` with `afterSeq` replays exactly
+  what the client hasn't seen, and each client receives each event
+  exactly once (dedup by seq). `session/event` notifications fan out to
+  every subscribed connection.
+- **Host-side contract enforcement** — incoming requests on the canonical
+  surface are validated against `Ask::SessionProtocol::Methods` before
+  dispatch (invalid params → `-32602 invalid_params`). Params are
+  normalized to string keys so Ruby clients may send symbols.
+- **`Connection` class** — per-client I/O plus subscription cursors;
+  `EventTranslator` retains a capped event log (2000) for replay/polling.
+
+### Changed
+
+- `Server` is now the transport-agnostic protocol engine: `dispatch(msg,
+  connection)` processes one message and writes responses back to the
+  sending connection; `push_pending` delivers events to subscribed
+  connections. `Server#start` is the stdio transport (one connection).
+- `session/subscribe` now registers the *connection's* cursor (replay
+  default) instead of a global store flag.
+
+### Removed
+
+- `SessionManager#pending_notifications` (superseded by cursor-based
+  delivery).
+
 ## [0.2.0] - 2026-08-11
 
 ### Changed

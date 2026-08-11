@@ -17,7 +17,12 @@ require "json"
 require "stringio"
 
 require "minitest/autorun"
-require "mocha/minitest" if Gem.loaded_specs.key?("mocha")
+begin
+  require "mocha/minitest"
+rescue LoadError
+  # mocha is a dev dependency; without it, stubs are unavailable but the
+  # non-mocking tests still run (e.g. plain `ruby -Ilib -Itest`).
+end
 
 # Register default models needed for tests into the model catalog.
 # This ensures SessionManager's DEFAULT_MODEL can be resolved.

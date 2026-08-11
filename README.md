@@ -38,7 +38,22 @@ gem "ask-app-server"
 ```bash
 # Start the server (reads JSON-RPC from stdin, writes to stdout)
 ask-app-server
+
+# Or expose a unix socket for multi-client attach (runs alongside stdio):
+ask-app-server --socket ~/.ask-app-server/app-server.sock
 ```
+
+Clients connect to the socket and speak the same protocol as NDJSON lines
+(`ASK_APP_SERVER_SOCKET` env var works too):
+
+```bash
+nc -U ~/.ask-app-server/app-server.sock
+{"id":1, "method":"initialize", "params":{}}
+```
+
+Any number of clients can attach to the same sessions: each connection
+tracks its own event-delivery cursor, so `session/subscribe` replays what
+that client hasn't seen and every client receives each event exactly once.
 
 From another process, send JSON-RPC requests:
 

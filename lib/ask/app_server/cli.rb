@@ -8,14 +8,16 @@ module Ask
     #
     # Usage:
     #   ask-app-server                   # Start in stdio mode (default)
-    #   ask-app-server --version         # Show version
-    #   ask-app-server --help            # Show help
-    #   ask-app-server --config PATH     # Use specific config file
+    #   ask-app-server --socket PATH    # Also listen on a unix socket (multi-client)
+    #   ask-app-server --version        # Show version
+    #   ask-app-server --help           # Show help
+    #   ask-app-server --config PATH    # Use specific config file
     #
     # Environment variables:
     #   ASK_APP_SERVER_CONFIG   - Path to config file (default: auto-detect)
     #   ASK_APP_SERVER_MODEL    - Model to use (overrides config file)
     #   ASK_APP_SERVER_PERMISSIONS - Permission mode (overrides config file)
+    #   ASK_APP_SERVER_SOCKET   - Unix socket path (same as --socket)
     #   DEBUG                   - Enable debug logging (1/0)
     class CLI
       def self.run!(args = ARGV)
@@ -32,14 +34,14 @@ module Ask
           return
         end
 
-        # Parse --config from args
+        # Parse --config and --socket from args
         config_path = nil
-        remaining_args = []
+        socket_path = nil
         args.each_with_index do |arg, i|
           if arg == "--config" && i + 1 < args.length
             config_path = args[i + 1]
-          elsif !arg.start_with?("--config")
-            remaining_args << arg
+          elsif arg == "--socket" && i + 1 < args.length
+            socket_path = args[i + 1]
           end
         end
 
@@ -66,7 +68,17 @@ module Ask
           permission_timeout: config.permission_timeout
         )
 
-        # Start the server
+        # Optional unix-socket transport for multi-client attach (runs
+        # alongside the stdio transport, sharing the session manager).
+        socket_path ||= ENV["ASK_APP_SERVER_SOCKET"]
+        socket_server = nil
+        if socket_path
+          socket_server = SocketServer.new(session_manager: session_manager, socket_path: socket_path)
+          socket_server.start
+          $stdout.puts "socket:    #{socket_server.socket_path}"
+        end
+
+        # Start the server (stdio transport, blocks)
         server = Server.new(session_manager: session_manager)
 
         begin
@@ -74,6 +86,7 @@ module Ask
         rescue Interrupt
           $stderr.puts "\n[ask-app-server] Shutting down..." if config.debug?
           server.stop
+          socket_server&.stop
         end
       end
 

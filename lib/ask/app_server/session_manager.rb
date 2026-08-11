@@ -246,14 +246,6 @@ module Ask
         @store.subscribed?(session_id)
       end
 
-      # Notify subscribers of new events.
-      def pending_notifications(session_id)
-        adapter = @store.get(session_id)
-        return [] unless adapter && subscribed?(session_id)
-
-        adapter.drain_events
-      end
-
       private
 
       # Resolve the session mode into approval options + plan mode.

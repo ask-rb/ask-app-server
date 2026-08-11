@@ -18,7 +18,7 @@ class GemspecTest < Minitest::Test
   end
 
   def test_version_is_defined
-    assert_equal "0.2.0", Ask::AppServer::VERSION
+    assert_equal "0.3.0", Ask::AppServer::VERSION
   end
 
   def test_error_classes_exist

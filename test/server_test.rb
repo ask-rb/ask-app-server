@@ -9,9 +9,10 @@ class ServerTest < Minitest::Test
     @session_manager = Ask::AppServer::SessionManager.new
     @server = Ask::AppServer::Server.new(session_manager: @session_manager)
 
-    # Capture stdout with a StringIO
+    # Each test dispatches through a Connection writing to a captured StringIO.
     @output = StringIO.new
     @output.sync = true
+    @connection = @server.add_connection(Ask::AppServer::Connection.new(StringIO.new(""), @output))
     @original_stdout = $stdout
     $stdout = @output
 
@@ -386,12 +387,87 @@ class ServerTest < Minitest::Test
     assert_equal "require", response.dig("result", "mode")
   end
 
+  # ── Host-side contract enforcement ─────────────────────────────────────
+
+  def test_invalid_params_rejected_by_contract
+    handle("session/send", { sessionId: "s1", content: 42 }, id: 1)
+    response = read_response
+
+    assert_equal(-32602, response.dig("error", "code"))
+    assert_match(/content/, response.dig("error", "message"))
+  end
+
+  def test_invalid_delivery_kind_rejected_by_contract
+    session_id = create_test_session
+    clear_output!
+
+    handle("session/subscribe", { sessionId: session_id, deliveryKind: "teleport" }, id: 2)
+    response = read_response
+
+    assert_equal(-32602, response.dig("error", "code"))
+  end
+
+  # ── Cursor-based event delivery ────────────────────────────────────────
+
+  def test_push_pending_delivers_events_after_connection_cursor
+    session_id = create_test_session
+    adapter = @session_manager.get(session_id)
+    clear_output!
+
+    # Subscribe: the connection cursor starts at 0, so the next push
+    # delivers the session.created event from the log.
+    handle("session/subscribe", { sessionId: session_id }, id: 2)
+    read_response
+    clear_output!
+
+    @server.push_pending
+
+    line = read_response
+    assert line, "subscribed connection should receive a session/event notification"
+    assert_equal "session/event", line["method"]
+    assert_equal "session.created", line.dig("params", "event", "type")
+
+    # Cursor advanced: a second push delivers nothing new.
+    clear_output!
+    @server.push_pending
+    assert_nil read_response
+  end
+
+  def test_push_pending_delivers_replay_from_after_seq
+    session_id = create_test_session
+    clear_output!
+
+    # Subscribe after seq 1 (session.created already seen): no replay.
+    handle("session/subscribe", { sessionId: session_id, afterSeq: 1 }, id: 2)
+    read_response
+    clear_output!
+
+    @server.push_pending
+    assert_nil read_response
+  end
+
+  def test_push_pending_respects_connection_isolation
+    session_id = create_test_session
+    adapter = @session_manager.get(session_id)
+
+    # Connection A subscribes; connection B does not.
+    output_b = StringIO.new
+    conn_b = Ask::AppServer::Connection.new(StringIO.new(""), output_b)
+    handle("session/subscribe", { sessionId: session_id }, id: 2)
+    read_response
+    clear_output!
+
+    @server.push_pending
+    assert read_response, "connection A should receive events"
+    assert output_b.string.empty?, "connection B should receive nothing"
+  end
+
   private
 
   def handle(method, params = {}, id: nil)
     msg = { "method" => method, "params" => params }
     msg["id"] = id if id
-    @server.send(:handle_message, msg)
+    @server.dispatch(msg, @connection)
   end
 
   def read_response
@@ -401,9 +477,14 @@ class ServerTest < Minitest::Test
   end
 
   def clear_output!
+    # The same logical client keeps its delivery cursors across an output
+    # swap; only the sink changes.
+    previous_subscriptions = @connection.subscriptions.dup
     @output = StringIO.new
     @output.sync = true
     $stdout = @output
+    @connection = @server.add_connection(Ask::AppServer::Connection.new(StringIO.new(""), @output))
+    previous_subscriptions.each { |sid, seq| @connection.subscribe(sid, after_seq: seq) }
     @read_index = 0
   end
 

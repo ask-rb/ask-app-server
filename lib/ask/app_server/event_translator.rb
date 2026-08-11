@@ -13,6 +13,12 @@ module Ask
     # numbers: clients poll (`session/events` after seq N) or subscribe
     # (the server pushes drained events as `session/event` notifications).
     class EventTranslator
+      # Events retained per session for replay/polling. Cursor-based
+      # delivery means the log is append-only; clients with cursors older
+      # than the cap miss the dropped events (durable log is a host
+      # storage concern).
+      MAX_EVENTS = 2000
+
       def initialize
         @events = []
         @seq = 0
@@ -229,6 +235,7 @@ module Ask
       def emit(type, payload)
         event = Ask::SessionProtocol::Events.event(type: type, seq: next_seq, payload: payload)
         @events << event
+        @events.shift if @events.size > MAX_EVENTS
         [event]
       end
     end
