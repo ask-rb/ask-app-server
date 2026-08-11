@@ -31,8 +31,12 @@ class ServerTest < Minitest::Test
 
     assert response, "should get a response"
     assert response["result"]
-    assert_equal "ask-app-server", response.dig("result", "serverInfo", "name")
-    assert response.dig("result", "capabilities", "sessionManagement")
+    assert_equal "ask-app-server", response.dig("result", "server", "name")
+    assert_equal Ask::SessionProtocol::PROTOCOL_VERSION, response.dig("result", "protocolVersion")
+    capabilities = response.dig("result", "capabilities")
+    assert_includes capabilities, "sessionManagement"
+    assert_includes capabilities, "interactions"
+    assert_includes capabilities, "planMode"
   end
 
   def test_session_create
@@ -83,11 +87,25 @@ class ServerTest < Minitest::Test
     session_id = create_test_session
     clear_output!
 
-    handle("session/subscribe", { sessionId: session_id, deliveryKind: "web-remote-replayable" }, id: 2)
+    handle("session/subscribe", { sessionId: session_id, deliveryKind: "replay" }, id: 2)
     response = read_response
 
     assert response
-    assert response.dig("result", "subscribed")
+    assert_equal session_id, response.dig("result", "subscription", "sessionId")
+    assert_equal "replay", response.dig("result", "subscription", "deliveryKind")
+  end
+
+  def test_session_subscribe_with_snapshot
+    session_id = create_test_session
+    clear_output!
+
+    handle("session/subscribe", { sessionId: session_id, includeSnapshot: true, afterSeq: 0 }, id: 2)
+    response = read_response
+
+    events = response.dig("result", "snapshot")
+    assert events
+    assert_equal "session.created", events[0]["type"]
+    assert_equal session_id, events[0]["payload"]["sessionId"]
   end
 
   def test_session_send
@@ -99,6 +117,7 @@ class ServerTest < Minitest::Test
 
     assert response
     assert response.dig("result", "accepted")
+    assert_equal "steered", response.dig("result", "status")
   end
 
   def test_session_send_no_session_id
@@ -136,6 +155,7 @@ class ServerTest < Minitest::Test
     response = read_response
 
     assert response
+    assert_equal "require", response.dig("result", "workspace", "mode")
     assert response.dig("result", "settings", "model", "current", "modelId")
   end
 
@@ -200,6 +220,170 @@ class ServerTest < Minitest::Test
 
     assert response
     assert_equal 1, response.dig("result", "sessions"), "should report 1 active session"
+  end
+
+  def test_ping_reports_protocol_version
+    handle("ping", {}, id: 1)
+    response = read_response
+    assert_equal Ask::SessionProtocol::PROTOCOL_VERSION, response.dig("result", "protocolVersion")
+  end
+
+  # ── Session close ──────────────────────────────────────────────────────
+
+  def test_session_close
+    session_id = create_test_session
+    clear_output!
+
+    handle("session/close", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    assert response
+    assert response.dig("result", "closed")
+    assert_nil @session_manager.get(session_id)
+  end
+
+  def test_session_close_nonexistent_errors
+    handle("session/close", { sessionId: "nope" }, id: 1)
+    response = read_response
+    assert_equal(-32004, response.dig("error", "code"))
+  end
+
+  # ── Interactions ───────────────────────────────────────────────────────
+
+  def test_interaction_list
+    session_id = create_test_session
+    adapter = @session_manager.get(session_id)
+    interaction = Ask::SessionProtocol::Interactions.interaction(
+      id: "act_1", kind: "approval",
+      payload: { "toolName" => "bash", "args" => { "command" => "ls" } }
+    )
+    adapter.stubs(:pending_interactions).returns([interaction])
+    clear_output!
+
+    handle("interaction/list", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    interactions = response.dig("result", "interactions")
+    assert_equal 1, interactions.size
+    assert_equal "act_1", interactions[0]["id"]
+    assert_equal "approval", interactions[0]["kind"]
+    assert_equal "bash", interactions[0]["payload"]["toolName"]
+  end
+
+  def test_interaction_approve
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:approve_interaction).with("act_1").returns(true)
+    clear_output!
+
+    handle("interaction/approve", { sessionId: session_id, interactionId: "act_1" }, id: 2)
+    response = read_response
+
+    assert response.dig("result", "approved")
+    assert_equal "act_1", response.dig("result", "interactionId")
+  end
+
+  def test_interaction_approve_not_found_errors
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:approve_interaction).returns(false)
+    clear_output!
+
+    handle("interaction/approve", { sessionId: session_id, interactionId: "act_999" }, id: 2)
+    response = read_response
+
+    assert_equal(-32006, response.dig("error", "code"))
+    assert_match(/not found/, response.dig("error", "message"))
+  end
+
+  def test_interaction_reject
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:reject_interaction).with("act_1").returns(true)
+    clear_output!
+
+    handle("interaction/reject", { sessionId: session_id, interactionId: "act_1" }, id: 2)
+    response = read_response
+
+    assert response.dig("result", "rejected")
+  end
+
+  def test_interaction_approve_all
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:approve_all_interactions).returns(2)
+    clear_output!
+
+    handle("interaction/approve-all", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    assert_equal 2, response.dig("result", "approved")
+  end
+
+  def test_interaction_reject_all
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:reject_all_interactions).returns(1)
+    clear_output!
+
+    handle("interaction/reject-all", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    assert_equal 1, response.dig("result", "rejected")
+  end
+
+  def test_interaction_respond_not_implemented
+    session_id = create_test_session
+    clear_output!
+
+    handle("interaction/respond", { sessionId: session_id, interactionId: "in_1", response: "yes" }, id: 2)
+    response = read_response
+
+    assert_equal(-32009, response.dig("error", "code"))
+  end
+
+  def test_interaction_requires_session
+    handle("interaction/list", {}, id: 1)
+    response = read_response
+    assert response.dig("error")
+  end
+
+  # ── Plan ───────────────────────────────────────────────────────────────
+
+  def test_plan_approve
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:plan_approve).returns(true)
+    clear_output!
+
+    handle("plan/approve", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    assert response.dig("result", "approved")
+  end
+
+  def test_plan_approve_no_pending_errors
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:plan_approve).returns(false)
+    clear_output!
+
+    handle("plan/approve", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    assert_equal(-32007, response.dig("error", "code"))
+  end
+
+  def test_plan_reject
+    session_id = create_test_session
+    @session_manager.get(session_id).stubs(:plan_reject).returns(true)
+    clear_output!
+
+    handle("plan/reject", { sessionId: session_id }, id: 2)
+    response = read_response
+
+    assert response.dig("result", "rejected")
+  end
+
+  def test_interaction_request_permission_query
+    handle("interaction/requestPermission", {}, id: 1)
+    response = read_response
+
+    assert response
+    assert_equal "require", response.dig("result", "mode")
   end
 
   private

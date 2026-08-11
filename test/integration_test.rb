@@ -23,8 +23,8 @@ class IntegrationTest < Minitest::Test
     assert_equal session_id, adapter.session_id
 
     # 2. Subscribe
-    result = manager.subscribe(session_id, delivery_kind: "test")
-    assert result[:subscribed]
+    result = manager.subscribe(session_id, delivery_kind: "replay")
+    assert result[:subscription][:sessionId]
 
     # 3. Verify subscribed
     assert manager.subscribed?(session_id)
@@ -39,13 +39,14 @@ class IntegrationTest < Minitest::Test
     assert sessions.any? { |s| s[:sessionId] == session_id }
 
     # 6. Send message
-    accepted = manager.send_message(session_id, "Hello!")
-    assert accepted
+    sent = manager.send_message(session_id, "Hello!")
+    assert sent[:accepted]
 
-    # 7. Check events (may be empty if no agent processing happened yet)
+    # 7. Check events: the session.created event is always present
     events = manager.get_events(session_id, after_seq: 0)
     assert events
     assert_equal session_id, events[:sessionId]
+    assert_equal "session.created", events[:events][0].type
 
     # 8. Destroy session
     assert manager.destroy_session(session_id)
@@ -82,7 +83,7 @@ class IntegrationTest < Minitest::Test
     adapter = manager.get(sid)
 
     assert adapter.translator
-    assert_equal sid, adapter.translator.session_id
+    assert_equal "session.created", adapter.translator.pending_events.last.type
   end
 
   def test_server_and_manager_integration

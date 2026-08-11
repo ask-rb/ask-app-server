@@ -62,9 +62,9 @@ class SessionManagerTest < Minitest::Test
   def test_subscribe
     session_id = @manager.create_session
 
-    result = @manager.subscribe(session_id, delivery_kind: "test")
-    assert result[:subscribed]
-    assert_equal session_id, result[:sessionId]
+    result = @manager.subscribe(session_id, delivery_kind: "replay")
+    assert_equal session_id, result[:subscription][:sessionId]
+    assert_equal "replay", result[:subscription][:deliveryKind]
 
     assert @manager.subscribed?(session_id)
   end
@@ -75,11 +75,14 @@ class SessionManagerTest < Minitest::Test
     end
   end
 
-  def test_get_events_empty
+  def test_get_events_starts_with_session_created
     session_id = @manager.create_session
     result = @manager.get_events(session_id, after_seq: 0)
     assert_equal session_id, result[:sessionId]
-    assert_empty result[:events]
+    assert_equal 1, result[:events].size
+    assert_equal "session.created", result[:events][0].type
+
+    assert_empty @manager.get_events(session_id, after_seq: 1)[:events]
   end
 
   def test_get_events_nonexistent_raises
@@ -93,5 +96,76 @@ class SessionManagerTest < Minitest::Test
     assert state[:settings]
     assert state.dig(:settings, :model, :current, :modelId), "should have model"
     assert state.dig(:settings, :model, :current, :providerId), "should have provider"
+    assert_equal "require", state.dig(:workspace, :mode)
+  end
+
+  # ── Send semantics ─────────────────────────────────────────────────────
+
+  def test_send_message_returns_status
+    session_id = @manager.create_session
+    adapter = @manager.get(session_id)
+    adapter.session.stubs(:run).returns("done")
+    adapter.session.stubs(:queued_steers).returns(0)
+    adapter.session.stubs(:turn_id).returns("turn-1")
+
+    result = @manager.send_message(session_id, "Hello")
+    assert result[:accepted]
+    assert_equal "steered", result[:status]
+    assert_equal "turn-1", result[:turnId]
+    adapter.wait_for_turn(timeout: 2)
+  end
+
+  def test_send_message_stale_expected_turn
+    session_id = @manager.create_session
+    adapter = @manager.get(session_id)
+    adapter.stubs(:send_message).with("Late message", expected_turn_id: "old-turn")
+      .returns({ status: "stale", turn_id: "other-turn" })
+
+    result = @manager.send_message(session_id, "Late message", expected_turn_id: "old-turn")
+    refute result[:accepted]
+    assert_equal "stale", result[:status]
+  end
+
+  # ── Interactions ───────────────────────────────────────────────────────
+
+  def test_interaction_controls_delegate_to_adapter
+    session_id = @manager.create_session
+    adapter = @manager.get(session_id)
+    interaction = Ask::SessionProtocol::Interactions.interaction(
+      id: "act_1", kind: "approval", payload: { "toolName" => "bash" }
+    )
+    adapter.stubs(:pending_interactions).returns([interaction])
+    adapter.stubs(:approve_interaction).with("act_1").returns(true)
+    adapter.stubs(:reject_interaction).with("act_2").returns(true)
+    adapter.stubs(:approve_all_interactions).returns(3)
+    adapter.stubs(:reject_all_interactions).returns(1)
+    adapter.stubs(:plan_approve).returns(true)
+    adapter.stubs(:plan_reject).returns(true)
+
+    assert_equal [interaction], @manager.pending_interactions(session_id)
+    assert @manager.approve_interaction(session_id, "act_1")
+    assert @manager.reject_interaction(session_id, "act_2")
+    assert_equal 3, @manager.approve_all_interactions(session_id)
+    assert_equal 1, @manager.reject_all_interactions(session_id)
+    assert @manager.plan_approve(session_id)
+    assert @manager.plan_reject(session_id)
+  end
+
+  def test_interaction_controls_require_session
+    assert_raises(Ask::AppServer::SessionNotFound) { @manager.pending_interactions("nope") }
+    assert_raises(Ask::AppServer::SessionNotFound) { @manager.approve_interaction("nope", "act_1") }
+    assert_raises(Ask::AppServer::SessionNotFound) { @manager.plan_approve("nope") }
+  end
+
+  # ── Close ──────────────────────────────────────────────────────────────
+
+  def test_close_session
+    session_id = @manager.create_session
+    adapter = @manager.get(session_id)
+    adapter.session.stubs(:delete)
+    adapter.session.stubs(:abort)
+
+    assert @manager.close_session(session_id)
+    assert_nil @manager.get(session_id)
   end
 end

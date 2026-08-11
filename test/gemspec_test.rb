@@ -7,7 +7,7 @@ class GemspecTest < Minitest::Test
     spec = Gem::Specification.load("ask-app-server.gemspec")
     assert spec, "gemspec should load"
     assert_equal "ask-app-server", spec.name
-    assert_equal "0.1.2", spec.version.to_s
+    assert_equal Ask::AppServer::VERSION, spec.version.to_s
     assert spec.summary, "should have a summary"
     assert spec.description, "should have a description"
     assert spec.homepage, "should have a homepage"
@@ -18,7 +18,7 @@ class GemspecTest < Minitest::Test
   end
 
   def test_version_is_defined
-    assert_equal "0.1.2", Ask::AppServer::VERSION
+    assert_equal "0.2.0", Ask::AppServer::VERSION
   end
 
   def test_error_classes_exist
@@ -26,7 +26,14 @@ class GemspecTest < Minitest::Test
     assert Ask::AppServer::ProtocolError
     assert Ask::AppServer::SessionNotFound
     assert Ask::AppServer::SessionAlreadyExists
+    assert Ask::AppServer::InteractionNotFound
+    assert Ask::AppServer::PlanNotFound
     assert Ask::AppServer::InvalidRequest
     assert Ask::AppServer::TimeoutError
+  end
+
+  def test_depends_on_session_protocol
+    spec = Gem::Specification.load("ask-app-server.gemspec")
+    assert spec.dependencies.any? { |d| d.name == "ask-session-protocol" }
   end
 end
