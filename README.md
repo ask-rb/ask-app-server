@@ -43,6 +43,13 @@ ask-app-server
 ask-app-server --socket ~/.ask-app-server/app-server.sock
 ```
 
+Running inside a [herdr](https://herdr.dev) pane? Nothing to configure:
+herdr injects `HERDR_SOCKET_PATH`/`HERDR_PANE_ID` into the pane, the host
+detects them, and keeps the herdr sidebar accurate with first-party state —
+`working` while a turn runs, `blocked` while an approval is pending,
+`idle` otherwise — plus the session id (for future resume) and model
+tokens. No screen scraping needed; the host knows its own state.
+
 Clients connect to the socket and speak the same protocol as NDJSON lines
 (`ASK_APP_SERVER_SOCKET` env var works too):
 

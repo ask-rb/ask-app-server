@@ -19,6 +19,12 @@ module Ask
       # storage concern).
       MAX_EVENTS = 2000
 
+      # Optional observer called with every emitted canonical Event.
+      # This is the single choke point for all session events (translations
+      # plus approval/plan/session-lifecycle emissions), so host-side
+      # side effects (e.g. the herdr reporter) hook here.
+      attr_accessor :on_event
+
       def initialize
         @events = []
         @seq = 0
@@ -236,6 +242,7 @@ module Ask
         event = Ask::SessionProtocol::Events.event(type: type, seq: next_seq, payload: payload)
         @events << event
         @events.shift if @events.size > MAX_EVENTS
+        on_event&.call(event)
         [event]
       end
     end

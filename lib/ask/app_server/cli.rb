@@ -68,6 +68,10 @@ module Ask
           permission_timeout: config.permission_timeout
         )
 
+        # Herdr citizenship: when running inside a herdr pane, keep the
+        # sidebar's agent state accurate from first-party host events.
+        herdr_reporter = HerdrReporter.attach(session_manager)
+
         # Optional unix-socket transport for multi-client attach (runs
         # alongside the stdio transport, sharing the session manager).
         socket_path ||= ENV["ASK_APP_SERVER_SOCKET"]
@@ -87,6 +91,7 @@ module Ask
           $stderr.puts "\n[ask-app-server] Shutting down..." if config.debug?
           server.stop
           socket_server&.stop
+          herdr_reporter&.close
         end
       end
 

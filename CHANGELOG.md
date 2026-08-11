@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0] - 2026-08-11
+
+### Added
+
+- **Herdr citizenship** — `HerdrReporter` keeps a herdr sidebar accurate
+  with first-party state when the host runs inside a herdr pane. Reads
+  `HERDR_SOCKET_PATH`/`HERDR_PANE_ID` (injected into every pane), reports
+  the aggregate pane state (`working` | `blocked` | `idle`) via
+  `pane.report_agent` on change, the ask session id via
+  `pane.report_agent_session` (for future resume), and model/session
+  tokens via `pane.report_metadata`. `HerdrReporter.attach(session_manager)`
+  returns nil outside herdr; the CLI attaches automatically.
+- **Session event observers** — `SessionManager#on_session_event` receives
+  every canonical event across all sessions as it happens; the observer
+  chain hooks the single emission point (`EventTranslator#on_event` →
+  `AgentAdapter#on_event`). Observers attach after store registration so
+  the store is settled, and the buffered `session.created` is replayed.
+
 ## [0.3.0] - 2026-08-11
 
 ### Added

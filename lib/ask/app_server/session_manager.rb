@@ -28,7 +28,15 @@ module Ask
         @permission_mode = permission_mode
         @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
         @permission_timeout = permission_timeout
+        @session_event_observers = []
         @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG || Logger::DEBUG : Logger::WARN)
+      end
+
+      # Register an observer for canonical events across all sessions.
+      # Called with (session_id, Ask::SessionProtocol::Events::Event) for
+      # every emitted event, as it happens.
+      def on_session_event(&block)
+        @session_event_observers << block
       end
 
       # Set the permission mode for new sessions (:on_request, :never, :auto).
@@ -68,6 +76,13 @@ module Ask
 
         session_id = adapter.start_session
         @store.add(session_id, adapter)
+
+        # Attach observers after registration so they see a settled store
+        # (e.g. the herdr reporter's session-count metadata), then replay
+        # the session.created event the adapter buffered during start.
+        adapter.on_event { |event| notify_session_event(adapter.session_id, event) }
+        created = adapter.pending_events.find { |e| e.type == "session.created" }
+        notify_session_event(session_id, created) if created
 
         @logger.info("Created session #{session_id} (model=#{model || DEFAULT_MODEL}, approval=#{approval_opts[:mode]})")
 
@@ -273,6 +288,10 @@ module Ask
         when "auto" then :auto
         else :require
         end
+      end
+
+      def notify_session_event(session_id, event)
+        @session_event_observers.each { |observer| observer.call(session_id, event) }
       end
 
       def build_default_system_prompt(workspace_path)

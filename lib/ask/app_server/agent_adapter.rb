@@ -46,6 +46,7 @@ module Ask
         @agent_dir = agent_dir
         @session = nil
         @translator = nil
+        @on_event_block = nil
         @session_id = nil
         @running = false
         @running_mutex = Mutex.new
@@ -59,6 +60,7 @@ module Ask
       # Returns the session ID.
       def start_session
         @translator = EventTranslator.new
+        @translator.on_event = @on_event_block if @on_event_block
         @session = build_session
         @session_id = @session.id
         @session.on_event { |event| handle_agent_event(event) }
@@ -71,8 +73,21 @@ module Ask
         @session = session
         @session_id = session.id
         @translator = EventTranslator.new
+        @translator.on_event = @on_event_block if @on_event_block
         @session.on_event { |event| handle_agent_event(event) }
         @session_id
+      end
+
+      # Register an observer for every canonical event this session emits
+      # (translations plus approval/plan/session-lifecycle emissions).
+      # May be called before start_session; the block is applied when the
+      # translator exists so the observer sees session.created.
+      def on_event(&block)
+        if @translator
+          @translator.on_event = block
+        else
+          @on_event_block = block
+        end
       end
 
       # Send a message and start processing (idle session) or inject it
