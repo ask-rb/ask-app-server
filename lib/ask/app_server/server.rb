@@ -5,21 +5,33 @@ require "time"
 
 module Ask
   module AppServer
-    # JSON-RPC server implementing the ZCode/Codex app-server protocol over stdio.
+    # JSON-RPC server implementing the canonical Ask::SessionProtocol over
+    # stdio. The session host: owns agent sessions behind one versioned
+    # contract that every client (terminal TUI, web console, bots, IDE)
+    # speaks.
     #
     # Communicates via NDJSON (Newline-Delimited JSON) over stdin/stdout.
-    # Supports session management, streaming events, and mid-execution injection.
     #
-    # Protocol methods:
-    #   session/create, session/list, session/resume, session/subscribe,
-    #   session/send, session/events, session/abort, workspace/readState
+    # Client → host methods (see Ask::SessionProtocol::Methods):
+    #   ping, initialize, session/create, session/list, session/resume,
+    #   session/subscribe, session/events, session/send, session/abort,
+    #   session/close, session/artifacts, session/artifact/get,
+    #   interaction/list, interaction/approve, interaction/reject,
+    #   interaction/approve-all, interaction/reject-all,
+    #   interaction/respond, plan/approve, plan/reject, workspace/readState
     #
-    # Notifications (server → client):
-    #   session/event, interaction/requestPermission, interaction/requestUserInput
+    # Host → client notifications:
+    #   session/event — carries a canonical event envelope {type, seq, payload}
     #
-    # The server also handles incoming responses to its outgoing requests
-    # (e.g., client responses to interaction/requestPermission).
+    # The server also handles incoming responses to its outgoing reverse
+    # requests (interaction/requestPermission, interaction/requestUserInput
+    # — the app-server interop surface).
     class Server
+      # Host capabilities advertised in `initialize`. The host emits every
+      # canonical event except file.changed today.
+      HOST_CAPABILITIES =
+        (Ask::SessionProtocol::Methods::CAPABILITIES - %w[fileEvents]).freeze
+
       def initialize(session_manager: nil)
         @session_manager = session_manager || SessionManager.new
         @running = false
@@ -94,7 +106,7 @@ module Ask
         @running
       end
 
-      # Send an outgoing JSON-RPC request to the client.
+      # Send an outgoing JSON-RPC request to the client (reverse request).
       # If a block is given, it will be called with (result, error) when
       # the client responds.
       def send_request(method, params, &block)
@@ -102,28 +114,6 @@ module Ask
         @response_handlers[id] = block if block
         write_line({ id: id, method: method, params: params })
         id
-      end
-
-      # Register a PermissionHandler so the server can wire its protocol sender.
-      # The server will set up the handler's on_request callback to send
-      # interaction/requestPermission messages and route responses back.
-      def register_permission_handler(handler)
-        handler.on_request do |request_id, tool_name, arguments|
-          send_request("interaction/requestPermission", {
-            requestId: request_id,
-            toolName: tool_name,
-            input: arguments,
-            riskLevel: blocked_tool_risk_level(tool_name),
-            reason: "Tool '#{tool_name}' requires approval"
-          }) do |result, error|
-            if result
-              decision = result["decision"] || result[:decision] || "deny"
-              handler.handle_response(request_id, decision)
-            else
-              handler.handle_response(request_id, "deny", reason: error&.dig("message"))
-            end
-          end
-        end
       end
 
       private
@@ -134,37 +124,25 @@ module Ask
         10_000 + @outgoing_id
       end
 
-      def blocked_tool_risk_level(tool_name)
-        case tool_name.to_s
-        when "bash" then "high"
-        when "write", "edit" then "medium"
-        when "destroy" then "critical"
-        else "medium"
-        end
-      end
-
       def register_default_handlers
         # Ping — liveness check
         handler("ping") do |_params, _id|
           {
             status: "ok",
-            uptime: @started_at ? (Time.now - @started_at).to_i : 0,
             version: Ask::AppServer::VERSION,
+            protocolVersion: Ask::SessionProtocol::PROTOCOL_VERSION,
+            uptime: @started_at ? (Time.now - @started_at).to_i : 0,
             sessions: @session_manager&.store&.count || 0
           }
         end
 
-        # Initialize handshake
-        handler("initialize") do |params, _id|
+        # Initialize handshake — negotiate the protocol version and
+        # exchange capabilities.
+        handler("initialize") do |_params, _id|
           {
-            protocolVersion: "2025-01-01",
-            capabilities: {
-              sessionManagement: true,
-              eventStreaming: true,
-              midExecutionInjection: true,
-              permissions: true
-            },
-            serverInfo: {
+            protocolVersion: Ask::SessionProtocol::PROTOCOL_VERSION,
+            capabilities: HOST_CAPABILITIES,
+            server: {
               name: "ask-app-server",
               version: Ask::AppServer::VERSION
             }
@@ -222,35 +200,33 @@ module Ask
           }
         end
 
-        # Session: subscribe
+        # Session: subscribe — attach to the event stream with replay.
         handler("session/subscribe") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
-          delivery_kind = params["deliveryKind"] || params[:deliveryKind] || "web-remote-replayable"
+          delivery_kind = params["deliveryKind"] || params[:deliveryKind] || "replay"
           after_seq = params["afterSeq"] || params[:afterSeq] || 0
           include_snapshot = params["includeSnapshot"] || params[:includeSnapshot] || false
 
           result = @session_manager.subscribe(session_id, delivery_kind: delivery_kind)
 
-          snapshot = if include_snapshot
-            @session_manager.get_events(session_id, after_seq: after_seq)
-          else
-            nil
+          if include_snapshot
+            snapshot = @session_manager.get_events(session_id, after_seq: after_seq)
+            result[:snapshot] = serialize_events(snapshot[:events])
           end
 
-          result.merge(snapshot: snapshot).compact
+          result
         end
 
-        # Session: send
+        # Session: send — prompt an idle session or inject mid-run.
         handler("session/send") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
           content = params["content"] || params[:content]
+          expected_turn_id = params["expectedTurnId"] || params[:expectedTurnId]
 
           raise InvalidRequest, "sessionId is required" unless session_id
           raise InvalidRequest, "content is required" unless content
 
-          @session_manager.send_message(session_id, content.to_s)
-
-          { accepted: true, sessionId: session_id }
+          @session_manager.send_message(session_id, content, expected_turn_id: expected_turn_id)
         end
 
         # Session: events (polling)
@@ -259,7 +235,9 @@ module Ask
           after_seq = params["afterSeq"] || params[:afterSeq] || 0
           limit = params["limit"] || params[:limit]
 
-          @session_manager.get_events(session_id, after_seq: after_seq, limit: limit)
+          result = @session_manager.get_events(session_id, after_seq: after_seq, limit: limit)
+          result[:events] = serialize_events(result[:events])
+          result
         end
 
         # Session: abort
@@ -272,6 +250,17 @@ module Ask
 
           adapter.abort_turn!
           { aborted: true, sessionId: session_id }
+        end
+
+        # Session: close
+        handler("session/close") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          closed = @session_manager.close_session(session_id)
+          raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless closed
+
+          { closed: true, sessionId: session_id }
         end
 
         # Artifacts: list the session's tool deliverables
@@ -307,18 +296,98 @@ module Ask
           { artifact: record }
         end
 
-        # Workspace: read state
-        handler("workspace/readState") do |params, _id|
-          @session_manager.read_workspace_state
+        # ── Interactions (resolvable by id from any client) ──────────────
+
+        # Interaction: list pending approval interactions
+        handler("interaction/list") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          interactions = @session_manager.pending_interactions(session_id)
+          { interactions: interactions.map(&:to_h) }
         end
 
-        # Default handler for interaction/requestPermission
-        # This is both an incoming request from the client (to query current
-        # permission state) and the client may also respond to our outgoing
-        # permission requests via the response routing in handle_message.
-        handler("interaction/requestPermission") do |params, _id|
-          # If the client sends this as a request, respond with current state
-          { mode: @session_manager.permission_mode, pending: false }
+        # Interaction: approve by id
+        handler("interaction/approve") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          interaction_id = params["interactionId"] || params[:interactionId]
+          raise InvalidRequest, "sessionId and interactionId are required" unless session_id && interaction_id
+
+          approved = @session_manager.approve_interaction(session_id, interaction_id)
+          raise Ask::AppServer::InteractionNotFound, "Interaction #{interaction_id} not found" unless approved
+
+          { approved: true, interactionId: interaction_id }
+        end
+
+        # Interaction: reject by id
+        handler("interaction/reject") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          interaction_id = params["interactionId"] || params[:interactionId]
+          raise InvalidRequest, "sessionId and interactionId are required" unless session_id && interaction_id
+
+          rejected = @session_manager.reject_interaction(session_id, interaction_id)
+          raise Ask::AppServer::InteractionNotFound, "Interaction #{interaction_id} not found" unless rejected
+
+          { rejected: true, interactionId: interaction_id }
+        end
+
+        # Interaction: approve all pending
+        handler("interaction/approve-all") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          { approved: @session_manager.approve_all_interactions(session_id) }
+        end
+
+        # Interaction: reject all pending
+        handler("interaction/reject-all") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          { rejected: @session_manager.reject_all_interactions(session_id) }
+        end
+
+        # Interaction: respond to a user_input interaction (elicitation).
+        # Not implemented: ask-agent has no elicitation surface yet.
+        handler("interaction/respond") do |params, _id|
+          send_error(_id, Ask::SessionProtocol::Methods::ERROR_CODES[:not_implemented],
+                     "interaction/respond is not implemented: user input elicitation is not supported by the runtime")
+        end
+
+        # ── Plan mode ────────────────────────────────────────────────────
+
+        # Plan: approve the pending proposal
+        handler("plan/approve") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          approved = @session_manager.plan_approve(session_id)
+          raise Ask::AppServer::PlanNotFound, "No pending plan for session #{session_id}" unless approved
+
+          { approved: true }
+        end
+
+        # Plan: reject the pending proposal
+        handler("plan/reject") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          raise InvalidRequest, "sessionId is required" unless session_id
+
+          rejected = @session_manager.plan_reject(session_id)
+          raise Ask::AppServer::PlanNotFound, "No pending plan for session #{session_id}" unless rejected
+
+          { rejected: true }
+        end
+
+        # Workspace: read state
+        handler("workspace/readState") do |params, _id|
+          session_id = params["sessionId"] || params[:sessionId]
+          @session_manager.read_workspace_state(session_id)
+        end
+
+        # Interaction: requestPermission — when a client sends this as a
+        # request, respond with the current approval mode (interop query).
+        handler("interaction/requestPermission") do |_params, _id|
+          { mode: @session_manager.approval_mode.to_s, pending: false }
         end
       end
 
@@ -362,6 +431,10 @@ module Ask
           send_error(id, -32004, e.message) if id
         rescue Ask::AppServer::SessionAlreadyExists => e
           send_error(id, -32005, e.message) if id
+        rescue Ask::AppServer::InteractionNotFound => e
+          send_error(id, -32006, e.message) if id
+        rescue Ask::AppServer::PlanNotFound => e
+          send_error(id, -32007, e.message) if id
         rescue Ask::AppServer::InvalidRequest => e
           send_error(id, -32602, e.message) if id
         rescue => e
@@ -407,11 +480,16 @@ module Ask
           next if events.empty?
 
           events.each do |ev|
-            send_notification("session/event", ev)
+            send_notification("session/event", { event: ev.to_h })
           end
         end
       rescue => e
         @logger.debug("Push error: #{e.message}") if ENV["DEBUG"]
+      end
+
+      # Canonical Event objects → wire hashes.
+      def serialize_events(events)
+        events.map(&:to_h)
       end
     end
   end

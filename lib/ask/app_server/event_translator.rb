@@ -4,89 +4,112 @@ require "securerandom"
 
 module Ask
   module AppServer
-    # Translates ask-agent Events into app-server protocol events.
+    # Translates ask-agent runtime events into canonical
+    # Ask::SessionProtocol events (the contract between the host and every
+    # client). Every emitted event is validated against the protocol
+    # registry, so a malformed translation fails fast at the boundary.
     #
-    # ask-agent emits events like TurnStart, TextDelta, ToolExecutionStart, etc.
-    # The app-server protocol uses a different set: turn.started, model.streaming,
-    # tool.updated, turn.completed, turn.failed, message.upserted.
-    #
-    # This class maps between the two models, emitting app-server protocol events
-    # that clients such as the Python Telegram bot and Vercel AI SDK expect.
+    # The translator owns the per-session event buffer and sequence
+    # numbers: clients poll (`session/events` after seq N) or subscribe
+    # (the server pushes drained events as `session/event` notifications).
     class EventTranslator
-      attr_reader :session_id, :turn_id
-
-      def initialize(session_id)
-        @session_id = session_id
-        @turn_id = nil
-        @seq = 0
+      def initialize
         @events = []
-        @streaming_text = +""
+        @seq = 0
+        @turn_id = nil
         @turn_active = false
-        @in_reflection = false
+        @streaming_text = +""
+        @plan_interaction_id = nil
       end
 
-      # Translate an ask-agent event into zero or more app-server events.
-      # Returns an array of event hashes (may be empty).
+      # Translate one ask-agent event into zero or more canonical events.
+      # Returns an array of Ask::SessionProtocol::Events::Event (may be
+      # empty); events are buffered for delivery.
       def translate(agent_event)
         case agent_event
         when Ask::Agent::Events::TurnStart
-          translate_turn_start
+          turn_started
         when Ask::Agent::Events::TextDelta
-          translate_text_delta(agent_event)
+          text_delta(agent_event)
+        when Ask::Agent::Events::ThinkingDelta
+          thinking_delta(agent_event)
         when Ask::Agent::Events::ToolCallDelta
-          # ToolCallDelta is informational; we track calls but don't emit
-          # until execution actually starts.
+          # Informational; execution events carry the tool lifecycle.
           []
         when Ask::Agent::Events::ToolExecutionStart
-          translate_tool_start(agent_event)
+          tool_start(agent_event)
         when Ask::Agent::Events::ToolExecutionUpdate
-          translate_tool_update(agent_event)
+          tool_update(agent_event)
         when Ask::Agent::Events::ToolExecutionEnd
-          translate_tool_end(agent_event)
-        when Ask::Agent::Events::MessageEnd
-          # Fires after the LLM response is complete (before tool execution).
-          # Not mapped directly; we already streamed the text.
-          []
-        when Ask::Agent::Events::TurnEnd
-          # Fires after tool execution completes for one recursive iteration.
-          # The session may continue with more tool calls.
-          []
-        when Ask::Agent::Events::ReflectionStart
-          # Reflection is an internal detail — skip
-          @in_reflection = true
-          []
-        when Ask::Agent::Events::ReflectionDelta
-          # Treat reflection text as regular model output
-          translate_text_delta(agent_event)
-        when Ask::Agent::Events::ReflectionEnd
-          @in_reflection = false
-          []
-        when Ask::Agent::Events::CompactionStart
-          []
-        when Ask::Agent::Events::CompactionEnd
-          []
-        when Ask::Agent::Events::Error
-          translate_error(agent_event)
-        when Ask::Agent::Events::SessionEnd
-          translate_session_end(agent_event)
+          tool_end(agent_event)
+        when Ask::Agent::Events::TodoUpdated
+          todos_updated(agent_event)
+        when Ask::Agent::Events::PlanProposed
+          plan_proposed(agent_event)
+        when Ask::Agent::Events::PlanApproved
+          plan_approved(agent_event)
+        when Ask::Agent::Events::PlanRejected
+          plan_rejected(agent_event)
         when Ask::Agent::Events::MaxTurnsExceeded
-          translate_turn_failed("Max turns exceeded (#{agent_event.max_turns})")
+          turn_failed("Max turns exceeded (#{agent_event.max_turns})")
         when Ask::Agent::Events::LoopDetected
-          translate_turn_failed("Loop detected on tool: #{agent_event.tool_name}")
+          turn_failed("Loop detected on tool: #{agent_event.tool_name}")
+        when Ask::Agent::Events::Error
+          error(agent_event)
+        when Ask::Agent::Events::SessionEnd
+          session_end(agent_event)
         else
+          # TurnEnd, MessageStart/End, Reflection*, Compaction*,
+          # SessionRolledBack/Forked, Evaluation*, MetaAgentAnalysis —
+          # internal detail, no canonical representation.
           []
         end
       end
 
-      # All events emitted since last poll.
+      # ── Queue/plan-driven emission (not ask-agent events) ──────────────
+
+      # An approval action was queued: emit approval.required.
+      #
+      # @param action [Ask::Agent::ApprovalQueue::Action]
+      def approval_required(action)
+        payload = { "toolName" => action.tool_name.to_s }
+        payload["args"] = action.args if action.args
+        payload["message"] = action.message if action.message
+        payload["autoApprovable"] = action.auto_approvable unless action.auto_approvable.nil?
+        emit("approval.required", payload.merge("id" => "act_#{action.id}"))
+      end
+
+      # An approval action changed status: emit approval.updated.
+      #
+      # @param action [Ask::Agent::ApprovalQueue::Action]
+      def approval_updated(action)
+        status = action.status.to_s
+        return unless %w[approved rejected].include?(status)
+
+        emit("approval.updated", { "id" => "act_#{action.id}", "status" => status })
+      end
+
+      # A session was created: emit session.created.
+      def session_created(session_id)
+        emit("session.created", { "sessionId" => session_id })
+      end
+
+      # A session ended: emit session.ended.
+      def session_ended(session_id, reason: "closed")
+        emit("session.ended", { "sessionId" => session_id, "reason" => reason })
+      end
+
+      # ── Buffer access ──────────────────────────────────────────────────
+
+      # All events since the last drain.
       def pending_events
         @events
       end
 
       # Drain and return all pending events, clearing the buffer.
       def drain_events
-        evs = @events.dup
-        @events.clear
+        evs = @events
+        @events = []
         evs
       end
 
@@ -95,99 +118,118 @@ module Ask
         @seq
       end
 
+      # Events after a given sequence number.
+      def events_after(after_seq)
+        @events.select { |e| e.seq > after_seq }
+      end
+
       private
 
       def next_seq
         @seq += 1
-        @seq
       end
 
-      def translate_turn_start
+      def turn_started
         @turn_id = SecureRandom.uuid
         @turn_active = true
         @streaming_text = +""
-
-        ev = build_event("turn.started", { turnId: @turn_id })
-        [ev]
+        emit("turn.started", { "turnId" => @turn_id })
       end
 
-      def translate_text_delta(event)
+      def text_delta(event)
         content = event.content.to_s
         return [] if content.empty?
 
         @streaming_text << content
-
-        ev = build_event("model.streaming", { delta: content })
-        [ev]
+        emit("model.streaming", { "delta" => content })
       end
 
-      def translate_tool_start(event)
-        ev = build_event("tool.updated", {
-          toolName: event.name,
-          kind: "started",
-          input: event.arguments
-        })
-        [ev]
+      def thinking_delta(event)
+        content = event.content.to_s
+        return [] if content.empty?
+
+        emit("model.thinking", { "delta" => content })
       end
 
-      def translate_tool_update(event)
-        ev = build_event("tool.updated", {
-          toolName: event.name,
-          kind: "updated",
-          output: event.partial_result.to_s
-        })
-        [ev]
-      end
-
-      def translate_tool_end(event)
-        kind = event.is_error ? "failed" : "completed"
-        ev = build_event("tool.updated", {
-          toolName: event.name,
-          kind: kind,
-          output: event.result.to_s,
-          durationMs: event.duration_ms
-        })
-        [ev]
-      end
-
-      def translate_session_end(event)
-        @turn_active = false
-        response_text = event.result.to_s
-
-        ev = build_event("turn.completed", {
-          response: response_text,
-          turnCount: event.turn_count,
-          toolCallsMade: event.tool_calls_made,
-          inputTokens: event.input_tokens,
-          outputTokens: event.output_tokens,
-          cost: event.cost
-        })
-        [ev]
-      end
-
-      def translate_error(event)
-        return [] if @turn_active
-        translate_turn_failed(event.error)
-      end
-
-      def translate_turn_failed(message)
-        @turn_active = false
-        ev = build_event("turn.failed", {
-          error: { message: message.to_s }
-        })
-        [ev]
-      end
-
-      def build_event(type, payload)
-        event = {
-          type: type,
-          seq: next_seq,
-          payload: payload,
-          turnId: @turn_id,
-          sessionId: @session_id
+      def tool_start(event)
+        payload = {
+          "id" => event.id.to_s,
+          "name" => event.name.to_s,
+          "args" => event.arguments
         }
+        emit("tool.use", payload)
+      end
+
+      def tool_update(event)
+        payload = {
+          "id" => event.id.to_s,
+          "name" => event.name.to_s,
+          "partial" => event.partial_result.to_s
+        }
+        emit("tool.delta", payload)
+      end
+
+      def tool_end(event)
+        payload = {
+          "id" => event.id.to_s,
+          "name" => event.name.to_s,
+          "output" => event.result,
+          "isError" => !!event.is_error,
+          "durationMs" => event.duration_ms
+        }
+        emit("tool.result", payload)
+      end
+
+      def todos_updated(event)
+        todos = event.todos.map { |entry| entry.to_h.transform_keys(&:to_s) }
+        emit("todos.updated", { "todos" => todos })
+      end
+
+      def plan_proposed(event)
+        @plan_interaction_id = "plan_#{next_seq}"
+        emit("plan.proposed", { "id" => @plan_interaction_id, "plan" => event.plan.to_s })
+      end
+
+      def plan_approved(event)
+        payload = { "plan" => event.plan.to_s }
+        payload["id"] = @plan_interaction_id if @plan_interaction_id
+        emit("plan.approved", payload)
+      end
+
+      def plan_rejected(event)
+        payload = { "plan" => event.plan.to_s }
+        payload["id"] = @plan_interaction_id if @plan_interaction_id
+        emit("plan.rejected", payload)
+      end
+
+      def session_end(event)
+        @turn_active = false
+        payload = {}
+        payload["turnId"] = @turn_id if @turn_id
+        payload["response"] = event.result.to_s
+        payload["inputTokens"] = event.input_tokens if event.input_tokens
+        payload["outputTokens"] = event.output_tokens if event.output_tokens
+        payload["cost"] = event.cost if event.cost
+        emit("turn.completed", payload)
+      end
+
+      def error(event)
+        payload = { "error" => event.error.to_s }
+        payload["recoverable"] = event.recoverable unless event.recoverable.nil?
+        emit("error", payload)
+      end
+
+      def turn_failed(message)
+        @turn_active = false
+        payload = { "error" => message.to_s }
+        payload["turnId"] = @turn_id if @turn_id
+        emit("turn.failed", payload)
+      end
+
+      def emit(type, payload)
+        event = Ask::SessionProtocol::Events.event(type: type, seq: next_seq, payload: payload)
         @events << event
-        event
+        [event]
       end
     end
   end

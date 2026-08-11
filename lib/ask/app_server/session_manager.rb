@@ -2,16 +2,21 @@
 
 module Ask
   module AppServer
-    # Manages the lifecycle of agent sessions exposed through the app-server.
+    # Manages the lifecycle of agent sessions exposed through the session
+    # host (ask-app-server).
     #
     # Orchestrates creation, resumption, subscription, messaging, aborting,
-    # and event polling across AgentAdapter instances stored in SessionStore.
+    # interaction resolution (approvals, plan), closing, and event polling
+    # across AgentAdapter instances stored in SessionStore.
     class SessionManager
       # Default tools if none specified.
       DEFAULT_TOOLS = %w[bash read write edit glob grep].freeze
 
       # Default model if none specified.
       DEFAULT_MODEL = ENV.fetch("ASK_APP_SERVER_MODEL", "opencode_go/deepseek-v4-flash")
+
+      # Tools gated behind human approval when approval is :require.
+      DEFAULT_REQUIRE_APPROVAL = %w[write edit bash destroy].freeze
 
       attr_reader :store
       attr_reader :permission_mode
@@ -21,72 +26,52 @@ module Ask
       def initialize(store: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
         @store = store || SessionStore.new
         @permission_mode = permission_mode
-        @blocked_tools = blocked_tools
+        @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
         @permission_timeout = permission_timeout
-        @permission_handlers = {}  # session_id => PermissionHandler
-        @on_new_handler = nil  # callback for new permission handlers
         @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG || Logger::DEBUG : Logger::WARN)
       end
 
-      # Register a callback that fires for every new PermissionHandler created.
-      # The server uses this to wire its protocol sender callback.
-      def on_new_permission_handler(&block)
-        @on_new_handler = block
-      end
-
-      # Set the permission mode for new sessions.
+      # Set the permission mode for new sessions (:on_request, :never, :auto).
       def permission_mode=(mode)
         @permission_mode = mode.to_sym
       end
 
+      # The approval mode new sessions get, translated to the canonical
+      # vocabulary (:off, :require, :auto).
+      def approval_mode
+        translate_permission_mode(@permission_mode)
+      end
+
       # Create a new session.
       # Returns the session ID.
+      #
+      # @param mode [String, Symbol, nil] "on_request"/"build"/"edit"
+      #   (approvals required for blocked tools), "auto", "never"/"off"/"yolo"
+      #   (no approvals), "plan" (plan mode, read-only until approved); nil
+      #   falls back to the manager's permission_mode
       def create_session(workspace_path: nil, mode: nil, model: nil, tools: nil, system_prompt: nil)
-        permission_mode = resolve_permission_mode(mode)
+        approval_opts, plan_mode = resolve_approval(mode)
 
         # Extract provider prefix from model string (e.g., "opencode_go/deepseek-v4-flash")
         model_id, model_provider = parse_model_string(model || DEFAULT_MODEL)
         model_for_agent = model_provider ? model_id : (model || DEFAULT_MODEL)
-
-        # Create the permission handler if needed
-        permission_handler = if permission_mode == :on_request
-          handler_opts = { mode: :on_request }
-          handler_opts[:blocked_tools] = @blocked_tools if @blocked_tools
-          handler_opts[:timeout] = @permission_timeout if @permission_timeout
-
-          handler = PermissionHandler.new(**handler_opts)
-          @permission_handlers[session_id_cache] = handler if session_id_cache
-          handler
-        end
-
-        hooks = {}
-        hooks[:before_tool] = [permission_handler] if permission_handler
 
         adapter = AgentAdapter.new(
           model: model_for_agent,
           tools: tools || DEFAULT_TOOLS,
           system_prompt: system_prompt || build_default_system_prompt(workspace_path),
           agent_dir: workspace_path,
-          hooks: hooks
+          approval: approval_opts[:mode],
+          require_approval: approval_opts[:require_approval],
+          plan_mode: plan_mode
         )
 
         session_id = adapter.start_session
         @store.add(session_id, adapter)
 
-        # Register the permission handler by session ID
-        if permission_handler
-          @permission_handlers[session_id] = permission_handler
-          @on_new_handler&.call(permission_handler)
-        end
-
-        @logger.info("Created session #{session_id} (model=#{model || DEFAULT_MODEL}, permission_mode=#{permission_mode})")
+        @logger.info("Created session #{session_id} (model=#{model || DEFAULT_MODEL}, approval=#{approval_opts[:mode]})")
 
         session_id
-      end
-
-      # Get the permission handler for a session, if any.
-      def permission_handler_for(session_id)
-        @permission_handlers[session_id]
       end
 
       # Remove a session.
@@ -94,14 +79,16 @@ module Ask
         adapter = @store.get(session_id)
         return false unless adapter
 
-        # Cancel any pending permission requests
-        handler = @permission_handlers.delete(session_id)
-        handler&.cancel_all!
-
         adapter.abort_turn! if adapter.running
+        adapter.close!
         @store.remove(session_id)
         @logger.info("Destroyed session #{session_id}")
         true
+      end
+
+      # Close a session (protocol alias of destroy_session).
+      def close_session(session_id)
+        destroy_session(session_id)
       end
 
       # Get an adapter by session ID.
@@ -114,28 +101,97 @@ module Ask
         @store.list(limit: limit)
       end
 
-      # Send a message to a session.
-      def send_message(session_id, content)
+      # Send a message to a session (prompt when idle, mid-execution
+      # injection when running).
+      #
+      # @return [Hash] { accepted: Boolean, status: "steered"|"queued"|"stale", turnId: }
+      def send_message(session_id, content, expected_turn_id: nil)
         adapter = @store.get(session_id)
         raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
-        if adapter.running
-          @logger.info("Session #{session_id} busy, injecting message")
-          adapter.inject_message(content)
-        else
-          adapter.send_message(content)
-        end
-
-        true
+        result = adapter.send_message(content, expected_turn_id: expected_turn_id)
+        {
+          accepted: result[:status] != "stale",
+          status: result[:status],
+          turnId: result[:turn_id]
+        }
       end
 
+      # ── Interactions (approvals) ───────────────────────────────────────
+
+      # Pending approval interactions for a session.
+      def pending_interactions(session_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.pending_interactions
+      end
+
+      # Approve a pending approval interaction by canonical id.
+      # @return [Boolean]
+      def approve_interaction(session_id, interaction_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.approve_interaction(interaction_id)
+      end
+
+      # Reject a pending approval interaction by canonical id.
+      # @return [Boolean]
+      def reject_interaction(session_id, interaction_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.reject_interaction(interaction_id)
+      end
+
+      # Approve every pending approval interaction.
+      # @return [Integer] number approved
+      def approve_all_interactions(session_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.approve_all_interactions
+      end
+
+      # Reject every pending approval interaction.
+      # @return [Integer] number rejected
+      def reject_all_interactions(session_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.reject_all_interactions
+      end
+
+      # ── Plan mode ───────────────────────────────────────────────────────
+
+      # Approve the pending plan proposal.
+      # @return [Boolean]
+      def plan_approve(session_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.plan_approve
+      end
+
+      # Reject the pending plan proposal; the agent stays in plan mode.
+      # @return [Boolean]
+      def plan_reject(session_id)
+        adapter = @store.get(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+
+        adapter.plan_reject
+      end
+
+      # ── Events and workspace ───────────────────────────────────────────
+
       # Subscribe to a session's events.
-      def subscribe(session_id, delivery_kind: "web-remote-replayable")
+      def subscribe(session_id, delivery_kind: "replay")
         adapter = @store.get(session_id)
         raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
         @store.subscribe(session_id, delivery_kind: delivery_kind)
-        { subscribed: true, sessionId: session_id, deliveryKind: delivery_kind }
+        { subscription: { sessionId: session_id, deliveryKind: delivery_kind } }
       end
 
       # Get events for a session after a sequence number.
@@ -155,6 +211,21 @@ module Ask
 
       # Read workspace state.
       def read_workspace_state(session_id = nil)
+        workspace = {
+          path: nil,
+          name: nil,
+          gitBranch: nil,
+          mode: approval_mode.to_s
+        }
+
+        if session_id
+          adapter = @store.get(session_id)
+          if adapter
+            workspace[:sessionId] = session_id
+            workspace[:running] = adapter.running
+          end
+        end
+
         settings = {
           model: {
             current: {
@@ -167,15 +238,7 @@ module Ask
           }
         }
 
-        if session_id
-          adapter = @store.get(session_id)
-          if adapter
-            settings[:sessionId] = session_id
-            settings[:running] = adapter.running
-          end
-        end
-
-        { settings: settings }
+        { workspace: workspace, settings: settings }
       end
 
       # Check if a session is subscribed.
@@ -193,12 +256,31 @@ module Ask
 
       private
 
-      def resolve_permission_mode(mode)
-        return :never if mode.to_s == "yolo"
-        return :never if mode.to_s == "plan"
-        return :on_request if mode.to_s == "build"
-        return :on_request if mode.to_s == "edit"
-        @permission_mode
+      # Resolve the session mode into approval options + plan mode.
+      #
+      # @return [Array(Hash, Boolean)] [{ mode:, require_approval: }, plan_mode]
+      def resolve_approval(mode)
+        plan_mode = false
+        approval_mode =
+          case mode.to_s
+          when "plan" then plan_mode = true; :off
+          when "yolo", "never", "off" then :off
+          when "build", "edit", "on_request" then :require
+          when "auto" then :auto
+          else translate_permission_mode(@permission_mode)
+          end
+
+        opts = { mode: approval_mode }
+        opts[:require_approval] = @blocked_tools if approval_mode == :require
+        [opts, plan_mode]
+      end
+
+      def translate_permission_mode(mode)
+        case mode.to_s
+        when "never", "off", "yolo" then :off
+        when "auto" then :auto
+        else :require
+        end
       end
 
       def build_default_system_prompt(workspace_path)
@@ -215,13 +297,6 @@ module Ask
         when /^gemini/ then "google"
         else "openai"
         end
-      end
-
-      # Temporary cache for session ID before it's created
-      def session_id_cache
-        @_sid_counter ||= 0
-        @_sid_counter += 1
-        "_pending_#{@_sid_counter}"
       end
 
       # Parse a model string that may include a provider prefix.

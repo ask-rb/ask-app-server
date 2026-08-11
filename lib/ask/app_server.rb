@@ -7,6 +7,8 @@ module Ask
     class SessionNotFound < Error; end
     class SessionAlreadyExists < Error; end
     class SessionNotSubscribed < Error; end
+    class InteractionNotFound < Error; end
+    class PlanNotFound < Error; end
     class InvalidRequest < Error; end
     class TimeoutError < Error; end
   end
