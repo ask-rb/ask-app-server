@@ -2,21 +2,22 @@
 
 [![Gem Version](https://badge.fury.io/rb/ask-app-server.svg)](https://badge.fury.io/rb/ask-app-server)
 
-**JSON-RPC/stdio app-server for ask-rb agents.** Exposes `Ask::Agent::Session`
-behind the standard app-server protocol: a vendor-neutral interface for
-driving an agent as a service, with sessions, streamed events, approvals, and
-turn lifecycle. Any client that implements the protocol can drive your agent,
-and the client never needs to know it's talking to Ruby. The same protocol is
-what several coding agents use behind their own app-servers (OpenAI's Codex
-app-server is one well-known implementation); ask-app-server isn't an
-extension of any of them — it simply speaks the standard.
+**JSON-RPC/stdio session host for ask-rb agents.** Exposes `Ask::Agent::Session`
+behind the canonical [ask-session-protocol](https://github.com/ask-rb/ask-session-protocol)
+wire contract: one versioned interface for driving an agent as a service,
+with sessions, streamed canonical events, resolvable interactions
+(approvals, plans), and turn lifecycle. Any client that speaks the protocol
+can drive your agent, and the client never needs to know it's talking to
+Ruby. The method surface is app-server compatible — the same shape Codex
+and ZCode expose — while the event vocabulary and interaction model are the
+ask ecosystem's own canonical contract.
 
 ## What is this?
 
-`ask-app-server` turns an ask-rb agent into a **programmable service** that speaks JSON-RPC over stdio. Any client that can speak the app-server protocol can drive your agent:
+`ask-app-server` turns an ask-rb agent into a **programmable service** that speaks JSON-RPC over stdio. Any client that speaks the canonical session protocol can drive your agent:
 
-- **IDE extensions and editors** — stream model deltas and tool events into an editor surface over stdio or a socket, the same way agent–editor integrations work today
-- **Custom chat UIs and desktop apps** — stream model deltas and tool events into your own interface
+- **IDE extensions and editors** — stream model deltas, tool events, and approvals into an editor surface over stdio or a socket
+- **Custom chat UIs and desktop apps** — stream canonical events into your own interface
 - **Bots and assistants** — drive sessions programmatically from any runtime that can spawn a subprocess
 - **Headless automation** — CI/CD pipelines, batch processing, scriptable agent tasks
 
@@ -52,27 +53,41 @@ From another process, send JSON-RPC requests:
 
 | Method | Description |
 |---|---|
-| `initialize` | Handshake, returns server capabilities |
+| `initialize` | Handshake; negotiates `protocolVersion` and capabilities |
 | `session/create` | Create a new agent session |
 | `session/list` | List active sessions |
 | `session/resume` | Resume an existing session |
-| `session/subscribe` | Subscribe to streaming events |
-| `session/send` | Send a message to a session |
+| `session/subscribe` | Subscribe to the event stream (with replay snapshot) |
+| `session/send` | Prompt an idle session or inject mid-run (`steered`/`queued`/`stale`) |
 | `session/events` | Poll for events after a sequence number |
 | `session/abort` | Abort the current turn |
-| `workspace/readState` | Read model and workspace settings |
+| `session/close` | Close the session |
+| `session/artifacts` · `session/artifact/get` | List and fetch tool artifacts |
+| `interaction/list` | List pending approval interactions |
+| `interaction/approve` · `interaction/reject` | Resolve an approval by id |
+| `interaction/approve-all` · `interaction/reject-all` | Resolve all approvals |
+| `interaction/respond` | Answer user-input elicitation (not yet implemented) |
+| `plan/approve` · `plan/reject` | Approve/reject the pending plan proposal |
+| `workspace/readState` | Read workspace and approval-mode state |
 
 ### Events (server → client notifications)
 
+Every event is a canonical `{type, seq, payload}` envelope, delivered as a
+`session/event` notification on subscribed sessions:
+
 | Event | When |
 |---|---|
-| `turn.started` | A new turn begins processing |
-| `model.streaming` | Text delta from the model |
-| `tool.updated` | Tool execution started/updated/completed/failed |
-| `turn.completed` | Turn finished successfully |
-| `turn.failed` | Turn ended with an error |
+| `session.created` · `session.ended` | Session lifecycle |
+| `turn.started` · `turn.completed` · `turn.failed` · `turn.aborted` | Turn lifecycle |
+| `model.streaming` · `model.thinking` | Model output deltas |
+| `tool.use` · `tool.delta` · `tool.result` | Tool execution |
+| `approval.required` · `approval.updated` | Resolvable approval interactions |
+| `plan.proposed` · `plan.approved` · `plan.rejected` | Plan mode |
+| `todos.updated` | Todo list changes |
+| `error` | Non-fatal errors |
 
-Event payloads are delivered as `session/event` notifications on subscribed sessions. The server also sends `interaction/requestPermission` when a blocked tool needs approval and `interaction/requestUserInput` when it needs input from the user.
+The full vocabulary, payload shapes, method specs, and versioning live in
+the ask-session-protocol gem (JSON Schema artifact included).
 
 ## Clients
 
@@ -95,7 +110,7 @@ Environment variables:
 |---|---|---|
 | `ASK_APP_SERVER_CONFIG` | auto-detected | Path to the config file |
 | `ASK_APP_SERVER_MODEL` | `opencode_go/deepseek-v4-flash` | Model identifier (overrides config file) |
-| `ASK_APP_SERVER_PERMISSIONS` | `on_request` | Permission mode (`on_request`, `never`) |
+| `ASK_APP_SERVER_PERMISSIONS` | `on_request` | Permission mode (`on_request`, `never`, `auto`) |
 | `DEBUG` | unset | Set to `1` for debug logging |
 
 ## Development
