@@ -130,7 +130,7 @@ module Ask
           ask-app-server v#{Ask::AppServer::VERSION}
 
           JSON-RPC/stdio app-server for ask-rb agents.
-          Drop-in compatible with the ZCode/Codex app-server protocol.
+          Drop-in compatible with the app-server protocol.
 
           USAGE:
             ask-app-server                  Start in stdio mode
