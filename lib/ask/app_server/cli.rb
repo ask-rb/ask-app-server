@@ -68,8 +68,9 @@ module Ask
           permission_timeout: config.permission_timeout
         )
 
-        # Herdr citizenship: when running inside a herdr pane, keep the
-        # sidebar's agent state accurate from first-party host events.
+        # Pane integration: when running inside a terminal workspace,
+        # keep its agent-state sidebar accurate from first-party host
+        # events.
         herdr_reporter = HerdrReporter.attach(session_manager)
 
         # Optional unix-socket transport for multi-client attach (runs

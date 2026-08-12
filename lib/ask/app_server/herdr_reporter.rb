@@ -5,11 +5,12 @@ require "socket"
 
 module Ask
   module AppServer
-    # Herdr citizenship: when the host runs inside a herdr pane, herdr
-    # injects HERDR_SOCKET_PATH and HERDR_PANE_ID into the pane's
-    # environment. This reporter connects to herdr's socket and keeps the
-    # sidebar accurate with first-party state — the host KNOWS when a turn
-    # is running or an approval is pending, which beats screen scraping:
+    # Pane integration: when the host runs inside a terminal workspace
+    # that injects HERDR_SOCKET_PATH and HERDR_PANE_ID into the pane's
+    # environment, this reporter connects to the workspace socket and
+    # keeps its agent-state sidebar accurate with first-party state —
+    # the host KNOWS when a turn is running or an approval is pending,
+    # which beats screen scraping:
     #
     #   pane.report_agent       — working | blocked | idle, on change
     #   pane.report_agent_session — the ask session id, for future resume
@@ -25,8 +26,8 @@ module Ask
       SOCKET_PATH_ENV = "HERDR_SOCKET_PATH"
       PANE_ID_ENV = "HERDR_PANE_ID"
 
-      # Reports originate from the ask host; herdr uses the pair to dedup
-      # and order per-source reports.
+      # Reports originate from the ask host; the workspace uses the pair
+      # to dedup and order per-source reports.
       SOURCE = "ask:app-server"
       AGENT = "ask"
 
@@ -38,8 +39,8 @@ module Ask
         session.created session.ended
       ].freeze
 
-      # @return [HerdrReporter, nil] a live reporter, or nil when herdr
-      #   environment variables are absent (not running in a herdr pane)
+      # @return [HerdrReporter, nil] a live reporter, or nil when the
+      #   workspace environment variables are absent
       def self.attach(session_manager, socket_path: ENV[SOCKET_PATH_ENV], pane_id: ENV[PANE_ID_ENV])
         return nil if socket_path.to_s.empty? || pane_id.to_s.empty?
 
@@ -47,7 +48,7 @@ module Ask
       end
 
       # @param session_manager [SessionManager]
-      # @param socket_path [String] herdr's socket (HERDR_SOCKET_PATH)
+      # @param socket_path [String] the workspace socket (HERDR_SOCKET_PATH)
       # @param pane_id [String] this pane (HERDR_PANE_ID)
       def initialize(session_manager:, socket_path:, pane_id:)
         @session_manager = session_manager
@@ -63,7 +64,7 @@ module Ask
         report_state(compute_state)
       end
 
-      # Stop reporting and drop the herdr connection.
+      # Stop reporting and drop the workspace connection.
       def close
         @enabled = false
         @mutex.synchronize do
@@ -164,7 +165,7 @@ module Ask
         socket.puts(JSON.generate({ id: "#{SOURCE}:#{@seq}", method: method, params: params }))
         socket.flush
       rescue Errno::EPIPE, Errno::ECONNREFUSED, IOError
-        # herdr went away; the next report reconnects
+        # The workspace went away; the next report reconnects
         @socket = nil
       end
 
@@ -182,11 +183,12 @@ module Ask
         end
       end
 
-      # herdr answers every request; drain responses so the socket never
-      # fills. Dies with the socket; the next report reconnects.
+      # The workspace answers every request; drain responses so the
+      # socket never fills. Dies with the socket; the next report
+      # reconnects.
       def drain_loop(socket)
         while (line = socket.gets)
-          # herdr responses/notifications — nothing to do
+          # workspace responses/notifications — nothing to do
         end
       rescue IOError, SystemCallError
         # socket closed

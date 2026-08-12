@@ -22,7 +22,7 @@ module Ask
       # Optional observer called with every emitted canonical Event.
       # This is the single choke point for all session events (translations
       # plus approval/plan/session-lifecycle emissions), so host-side
-      # side effects (e.g. the herdr reporter) hook here.
+      # side effects (e.g. the pane reporter) hook here.
       attr_accessor :on_event
 
       def initialize

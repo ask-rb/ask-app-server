@@ -78,7 +78,7 @@ module Ask
         @store.add(session_id, adapter)
 
         # Attach observers after registration so they see a settled store
-        # (e.g. the herdr reporter's session-count metadata), then replay
+        # (e.g. the pane reporter's session-count metadata), then replay
         # the session.created event the adapter buffered during start.
         adapter.on_event { |event| notify_session_event(adapter.session_id, event) }
         created = adapter.pending_events.find { |e| e.type == "session.created" }
