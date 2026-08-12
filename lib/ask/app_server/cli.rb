@@ -89,6 +89,9 @@ module Ask
           server.start
         rescue Interrupt
           $stderr.puts "\n[ask-app-server] Shutting down..." if config.debug?
+        ensure
+          # Clean up on Ctrl-C AND on normal exit (stdin EOF): the socket
+          # file must not outlive the host.
           server.stop
           socket_server&.stop
           herdr_reporter&.close
