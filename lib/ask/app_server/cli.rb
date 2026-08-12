@@ -79,7 +79,7 @@ module Ask
         if socket_path
           socket_server = SocketServer.new(session_manager: session_manager, socket_path: socket_path)
           socket_server.start
-          $stdout.puts "socket:    #{socket_server.socket_path}"
+          $stderr.puts "socket:    #{socket_server.socket_path}"
         end
 
         # Start the server (stdio transport, blocks)
