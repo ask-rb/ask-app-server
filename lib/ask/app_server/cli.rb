@@ -37,11 +37,14 @@ module Ask
         # Parse --config and --socket from args
         config_path = nil
         socket_path = nil
+        socket_only = false
         args.each_with_index do |arg, i|
           if arg == "--config" && i + 1 < args.length
             config_path = args[i + 1]
           elsif arg == "--socket" && i + 1 < args.length
             socket_path = args[i + 1]
+          elsif arg == "--socket-only"
+            socket_only = true
           end
         end
 
@@ -90,19 +93,37 @@ module Ask
           $stderr.puts "socket:    #{socket_server.socket_path}"
         end
 
-        # Start the server (stdio transport, blocks)
-        server = Server.new(session_manager: session_manager)
+        if socket_only
+          # Daemon mode: the host lives on the socket alone, no stdio
+          # transport — its lifetime must not depend on stdin (a
+          # supervisor's EOF would take the whole host down with it).
+          if socket_server.nil?
+            $stderr.puts "[ask-app-server] --socket-only needs --socket"
+            exit 1
+          end
+          begin
+            socket_server.join
+          rescue Interrupt
+            $stderr.puts "\n[ask-app-server] Shutting down..." if config.debug?
+          ensure
+            socket_server&.stop
+            herdr_reporter&.close
+          end
+        else
+          # Start the server (stdio transport, blocks)
+          server = Server.new(session_manager: session_manager)
 
-        begin
-          server.start
-        rescue Interrupt
-          $stderr.puts "\n[ask-app-server] Shutting down..." if config.debug?
-        ensure
-          # Clean up on Ctrl-C AND on normal exit (stdin EOF): the socket
-          # file must not outlive the host.
-          server.stop
-          socket_server&.stop
-          herdr_reporter&.close
+          begin
+            server.start
+          rescue Interrupt
+            $stderr.puts "\n[ask-app-server] Shutting down..." if config.debug?
+          ensure
+            # Clean up on Ctrl-C AND on normal exit (stdin EOF): the socket
+            # file must not outlive the host.
+            server.stop
+            socket_server&.stop
+            herdr_reporter&.close
+          end
         end
       end
 
@@ -141,11 +162,17 @@ module Ask
 
           USAGE:
             ask-app-server                  Start in stdio mode
+            ask-app-server --socket SOCK --socket-only
+                                            Start as a socket daemon (no stdio)
 
           OPTIONS:
             --version, -v                  Show version
             --help, -h                     Show this help message
             --config PATH                  Config file path (default: auto-detect)
+            --socket PATH                  Also expose a unix socket at PATH
+            --socket-only                  Daemon mode: serve the socket alone
+                                           (the host's lifetime does not depend
+                                           on stdin)
 
           CONFIG FILE (JSON):
             Search order:

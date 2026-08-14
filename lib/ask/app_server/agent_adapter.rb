@@ -44,6 +44,11 @@ module Ask
         @approval = approval
         @require_approval = require_approval
         @agent_dir = agent_dir
+        # The session's workspace is the tools' home: bash commands
+        # without an explicit cd run there (default_workdir), so the
+        # agent never drifts into the host's cwd — the recurring
+        # "where is the project?" failure mode.
+        @tools.each { |tool| tool.default_workdir = @agent_dir if tool.respond_to?(:default_workdir=) }
         @session = nil
         @translator = nil
         @on_event_block = nil

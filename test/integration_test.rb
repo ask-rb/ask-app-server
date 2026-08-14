@@ -103,6 +103,48 @@ class IntegrationTest < Minitest::Test
     assert File.executable?(bin_path), "CLI binary should be executable"
   end
 
+  # The daemon mode's whole point: the host serves the socket alone,
+  # and its lifetime does NOT depend on stdin. A supervisor's EOF must
+  # not take the host down with it.
+  def test_socket_only_host_survives_stdin_eof
+    require "open3"
+    bin_path = File.expand_path("../../bin/ask-app-server", __FILE__)
+    stdin_r = stdin_w = wait = nil
+
+    with_tempdir do |dir|
+      socket = File.join(dir, "host.sock")
+      # stdin is a pipe we close immediately — the stdio transport
+      # would see EOF and shut down; socket-only must ignore it.
+      stdin_r, stdin_w = IO.pipe
+      stdin_r.close
+      _out, _err, wait = Open3.popen2e(bin_path, "--socket", socket, "--socket-only", in: stdin_r)
+      stdin_w.close
+
+      # Give the host a moment to bind, then speak the protocol.
+      deadline = Time.now + 5
+      client = nil
+      begin
+        sleep 0.1
+        client = UNIXSocket.new(socket)
+      rescue Errno::ENOENT
+        retry if Time.now < deadline
+        flunk "host did not bind the socket"
+      end
+
+      client.puts(JSON.generate({ "jsonrpc" => "2.0", "id" => 1, "method" => "initialize", "params" => { "client" => { "name" => "test", "version" => "1" } } }))
+      response = client.gets
+      assert response, "host answered over the socket"
+      assert_includes response, "capabilities"
+
+      client.close
+      assert wait.alive?, "the host outlives its closed stdin"
+    ensure
+      stdin_r&.close rescue nil
+      stdin_w&.close rescue nil
+      wait&.kill
+    end
+  end
+
   def test_entry_point_loads
     # Just verify no load errors
     require "ask-app-server"

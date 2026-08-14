@@ -63,6 +63,12 @@ module Ask
         FileUtils.rm_f(@socket_path) rescue nil
       end
 
+      # Block until the acceptor stops (the process's main loop in
+      # socket-only mode — there's no stdio transport to join on).
+      def join
+        @acceptor&.join
+      end
+
       # Whether the server is running.
       def running?
         @running
