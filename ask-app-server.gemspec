@@ -32,7 +32,7 @@ Gem::Specification.new do |spec|
   spec.add_dependency "ask-session-protocol", ">= 0.1"
   spec.add_dependency "ask-tools", ">= 0.6.2"
   spec.add_dependency "ask-tools-shell", ">= 0.1"
-  spec.add_dependency "ask-state-providers", ">= 0.1"
+  spec.add_dependency "ask-state-providers", ">= 0.4.2"
 
   spec.add_development_dependency "minitest", "~> 5.25"
   spec.add_development_dependency "mocha", "~> 3.1"
