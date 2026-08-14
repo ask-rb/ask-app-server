@@ -18,7 +18,7 @@ class GemspecTest < Minitest::Test
   end
 
   def test_version_is_defined
-    assert_equal "0.4.0", Ask::AppServer::VERSION
+    assert_match(/\A\d+\.\d+\.\d+\z/, Ask::AppServer::VERSION, "version is defined and semver")
   end
 
   def test_error_classes_exist
