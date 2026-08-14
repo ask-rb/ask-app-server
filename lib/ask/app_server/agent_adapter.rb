@@ -329,7 +329,14 @@ module Ask
         when "glob" then Ask::Tools::Glob.new
         when "grep" then Ask::Tools::Grep.new
         when "code" then Ask::Tools::Code.new
-        else raise ArgumentError, "Unknown tool: #{name}"
+        else
+          # Deployment-registered tools (e.g. the board's executor tools
+          # via ASK_APP_SERVER_PRELOAD) resolve from the global registry
+          # (which returns instances, matched by tool name).
+          tool = Ask::Tools[name]
+          raise ArgumentError, "Unknown tool: #{name}" unless tool
+
+          tool
         end
       end
 

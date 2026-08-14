@@ -51,6 +51,13 @@ module Ask
         # Register custom models from config into the model catalog
         config.register_models!
 
+        # Preload hook: ASK_APP_SERVER_PRELOAD names a Ruby file required
+        # at boot, so deployments can register extra tools (e.g. board
+        # tools for the executor sessions) before any session is created.
+        if (preload = ENV["ASK_APP_SERVER_PRELOAD"])
+          require File.expand_path(preload)
+        end
+
         $stdout.sync = true
         $stderr.sync = true
 

@@ -160,6 +160,18 @@ class AgentAdapterTest < Minitest::Test
     assert read.is_a?(Ask::Tools::Read)
   end
 
+  def test_resolve_tool_from_the_global_registry
+    klass = Class.new(Ask::Tool) do
+      description "Deployment-registered tool"
+      name "board_tool"
+      def execute; "ok"; end
+    end
+    Ask::Tools.register(klass)
+
+    tool = @adapter.send(:resolve_tool_by_name, "board_tool")
+    assert tool.is_a?(klass), "preload-registered tools resolve from the global registry"
+  end
+
   def test_resolve_unknown_tool_raises
     assert_raises(ArgumentError) do
       @adapter.send(:resolve_tool_by_name, "nonexistent_tool")
