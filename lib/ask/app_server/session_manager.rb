@@ -62,6 +62,14 @@ module Ask
 
         # Extract provider prefix from model string (e.g., "opencode_go/deepseek-v4-flash")
         model_id, model_provider = parse_model_string(model || DEFAULT_MODEL)
+        # A provider-qualified model must stay resolvable: the agent's
+        # model catalog looks up bare ids, so the prefixed model is
+        # registered under its provider before the session builds its
+        # chat. Without this, "deepseek/deepseek-v4-flash" becomes the
+        # bare "deepseek-v4-flash" which the catalog may not know — the
+        # session falls back to the wrong provider and the run hangs
+        # silently on a missing credential.
+        register_prefixed_model(model_id, model_provider) if model_provider
         model_for_agent = model_provider ? model_id : (model || DEFAULT_MODEL)
 
         adapter = AgentAdapter.new(
@@ -317,6 +325,31 @@ module Ask
         return [str, nil] unless str&.include?("/")
         parts = str.split("/", 2)
         [parts[1], parts[0]]
+      end
+
+      # Make a provider-qualified model resolvable by the agent's model
+      # catalog: the catalog looks up bare ids, so a model that arrived
+      # as "provider/id" is registered under its provider. If the id is
+      # already known, its existing provider is preserved — the caller's
+      # explicit prefix is the override.
+      def register_prefixed_model(model_id, model_provider)
+        catalog = Ask::ModelCatalog.respond_to?(:instance) ? Ask::ModelCatalog.instance : nil
+        return unless catalog&.respond_to?(:register)
+
+        existing = catalog.find(model_id) rescue nil
+        return if existing && existing.provider.to_s == model_provider.to_s
+        return if existing && existing.provider.to_s != "unknown"
+
+        info = OpenStruct.new(
+          id: model_id.to_s,
+          provider: model_provider.to_s,
+          chat?: true,
+          context: 4096,
+          output: 4096
+        )
+        catalog.register(info)
+      rescue StandardError
+        nil # registration is best-effort; the session will surface a real error
       end
     end
   end

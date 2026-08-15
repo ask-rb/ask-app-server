@@ -299,8 +299,15 @@ module Ask
               @session.run("", reset: false)
             end
           rescue => e
-            # Agent may have been aborted — that's fine
-            @logger.debug("Agent run error: #{e.message}") if ENV["DEBUG"]
+            # An aborted turn raises Ask::Agent::Aborted — that's not a
+            # failure, the client asked for it. Everything else is a real
+            # run failure the client must see: without a turn.failed, a
+            # watching board would wait forever on a dead turn. The
+            # translator's failure event carries the message.
+            unless e.is_a?(Ask::Agent::Aborted) || e.class.name.to_s.include?("Aborted")
+              @logger.error("Agent run failed: #{e.class}: #{e.message}")
+              @translator.turn_failed(e.message.to_s[0, 500])
+            end
           ensure
             @running_mutex.synchronize { @running = false }
           end

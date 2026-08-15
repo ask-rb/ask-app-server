@@ -188,6 +188,11 @@ module Ask
       # events its sessions have produced since the connection's cursor,
       # then advance the cursor. Cursor-based, so each client receives
       # exactly the events after its own seq (replay on subscribe).
+      #
+      # Each event carries its sessionId: a connection may subscribe to
+      # several sessions, and the client routes events to the right
+      # watcher — without it, a multi-session client would record one
+      # session's events into another's run.
       def push_pending
         connections.each do |connection|
           connection.subscriptions.keys.each do |session_id|
@@ -198,7 +203,7 @@ module Ask
             next if events.empty?
 
             events.each do |ev|
-              connection.write({ method: "session/event", params: { event: ev.to_h } })
+              connection.write({ method: "session/event", params: { sessionId: session_id, event: ev.to_h } })
             end
             connection.advance(session_id, events.last.seq)
           end
