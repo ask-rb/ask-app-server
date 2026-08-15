@@ -135,6 +135,24 @@ module Ask
         @events.select { |e| e.seq > after_seq }
       end
 
+      # Whether a turn is mid-flight (started, not completed or failed).
+      # A run that returns while a turn is still active ended without a
+      # terminal event — the model stream dropped mid-turn — and the
+      # adapter must surface that as a failure, not let the client wait
+      # on a ghost.
+      def turn_active?
+        @turn_active
+      end
+
+      # Emit a turn.failed event. Called by the adapter when a run dies
+      # (an exception, or a stream that ended without completing).
+      def turn_failed(message)
+        @turn_active = false
+        payload = { "error" => message.to_s }
+        payload["turnId"] = @turn_id if @turn_id
+        emit("turn.failed", payload)
+      end
+
       private
 
       def next_seq
@@ -229,22 +247,6 @@ module Ask
         payload = { "error" => event.error.to_s }
         payload["recoverable"] = event.recoverable unless event.recoverable.nil?
         emit("error", payload)
-      end
-
-      # Whether a turn is mid-flight (started, not completed or failed).
-      # A run that returns while a turn is still active ended without a
-      # terminal event — the model stream dropped mid-turn — and the
-      # adapter must surface that as a failure, not let the client wait
-      # on a ghost.
-      def turn_active?
-        @turn_active
-      end
-
-      def turn_failed(message)
-        @turn_active = false
-        payload = { "error" => message.to_s }
-        payload["turnId"] = @turn_id if @turn_id
-        emit("turn.failed", payload)
       end
 
       def emit(type, payload)
