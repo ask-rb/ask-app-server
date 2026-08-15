@@ -231,6 +231,15 @@ module Ask
         emit("error", payload)
       end
 
+      # Whether a turn is mid-flight (started, not completed or failed).
+      # A run that returns while a turn is still active ended without a
+      # terminal event — the model stream dropped mid-turn — and the
+      # adapter must surface that as a failure, not let the client wait
+      # on a ghost.
+      def turn_active?
+        @turn_active
+      end
+
       def turn_failed(message)
         @turn_active = false
         payload = { "error" => message.to_s }

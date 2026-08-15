@@ -298,6 +298,16 @@ module Ask
             while @session.queued_steers.positive?
               @session.run("", reset: false)
             end
+            # A run that returned with the turn still active ended
+            # without a terminal event — the model stream dropped
+            # mid-turn (a dead connection, a provider that closed the
+            # stream early). Without this, the client would wait on a
+            # ghost run forever. Surface it as a failure so the fix
+            # loop can redeliver.
+            if @translator.turn_active?
+              @logger.error("Turn ended without a completion event — the model stream dropped mid-turn")
+              @translator.turn_failed("The model stream ended without completing the turn (the connection dropped mid-stream)")
+            end
           rescue => e
             # An aborted turn raises Ask::Agent::Aborted — that's not a
             # failure, the client asked for it. Everything else is a real
