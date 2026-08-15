@@ -17,7 +17,13 @@ module Ask
       # delivery means the log is append-only; clients with cursors older
       # than the cap miss the dropped events (durable log is a host
       # storage concern).
-      MAX_EVENTS = 2000
+      # How many events the translator buffers for cursor-based
+      # delivery. The cap must clear the largest thinking flood: a
+      # reasoning model streams thousands of deltas per turn (observed
+      # >9000), and events dropped here are dropped for every connected
+      # client — the completion event could fall in the gap and the
+      # client would watch a ghost run forever.
+      MAX_EVENTS = 20_000
 
       # Optional observer called with every emitted canonical Event.
       # This is the single choke point for all session events (translations

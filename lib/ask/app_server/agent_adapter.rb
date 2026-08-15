@@ -320,6 +320,7 @@ module Ask
             end
           ensure
             @running_mutex.synchronize { @running = false }
+            @logger.debug("Run thread ended: turn_active=#{@translator.turn_active?} last_seq=#{@translator.last_seq}")
           end
         end
 
