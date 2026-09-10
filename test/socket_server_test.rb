@@ -237,4 +237,43 @@ class SocketServerTest < Minitest::Test
     client&.close
     server2&.stop
   end
+
+  # The socket path is a fixed, shared name and hosts overlap: a
+  # successor started over a live host unlinks the predecessor's socket
+  # and binds its own. When the predecessor then exits (idle timeout,
+  # crash, manual kill), an unconditional rm_f deleted the path the
+  # SUCCESSOR was listening on — every later client got ENOENT while the
+  # successor stayed alive and looked healthy. Seen in the wild: a host
+  # orphaned two weeks earlier was killed during a routine cleanup and
+  # silently broke the host that had replaced it.
+  def test_stopping_a_superseded_server_leaves_the_successor_socket_alone
+    server2 = Ask::AppServer::SocketServer.new(
+      session_manager: Ask::AppServer::SessionManager.new,
+      socket_path: @socket_path
+    )
+    server2.start # unlinks @server's socket and binds its own
+
+    @server.stop # the superseded one exits
+
+    assert File.exist?(@socket_path),
+      "the successor's socket must survive the predecessor's exit"
+    client = Client.new(@socket_path)
+    response = client.request("ping")
+    assert_equal "ok", response.dig("result", "status")
+  ensure
+    client&.close
+    server2&.stop
+  end
+
+  # The normal path still cleans up after itself.
+  def test_stop_removes_own_socket_file
+    server2 = Ask::AppServer::SocketServer.new(
+      session_manager: Ask::AppServer::SessionManager.new,
+      socket_path: @socket_path
+    )
+    server2.start
+    server2.stop
+
+    refute File.exist?(@socket_path), "a server that still owns the path removes it"
+  end
 end

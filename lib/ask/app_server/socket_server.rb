@@ -47,20 +47,37 @@ module Ask
         FileUtils.mkdir_p(File.dirname(@socket_path))
         FileUtils.rm_f(@socket_path)  # stale socket from a previous run
         @listener = UNIXServer.new(@socket_path)
+        # Remember which inode we bound. A later host on the same path
+        # unlinks ours and binds its own; without this, our #stop would
+        # delete the successor's socket (see #stop).
+        @bound_identity = identity_of(@socket_path)
         @acceptor = Thread.new { accept_loop }
         @pusher = Thread.new { pusher_loop }
         @logger.debug("Socket server listening on #{@socket_path}")
         self
       end
 
-      # Stop accepting, close all connections, and remove the socket file.
+      # Stop accepting, close all connections, and remove the socket file
+      # — but only if it is still OURS.
+      #
+      # The socket path is a fixed, shared name, and hosts overlap: a
+      # predecessor starting up unlinks a stale path, and a successor
+      # started over a live one unlinks its predecessor's. The
+      # predecessor then exits (idle timeout, crash, manual kill) and an
+      # unconditional rm_f would delete the path the SUCCESSOR is
+      # listening on — every client after that gets ENOENT while the
+      # successor stays alive and looks healthy. Comparing the inode we
+      # bound against what is on disk now keeps a dying process from
+      # taking the live one down with it.
       def stop
         @running = false
         @acceptor&.kill rescue nil
         @pusher&.kill rescue nil
         @protocol.connections.each { |conn| @protocol.remove_connection(conn) }
         @listener&.close rescue nil
-        FileUtils.rm_f(@socket_path) rescue nil
+        FileUtils.rm_f(@socket_path) if ours_on_disk?
+      rescue SystemCallError
+        nil
       end
 
       # Block until the acceptor stops (the process's main loop in
@@ -75,6 +92,21 @@ module Ask
       end
 
       private
+
+      # (device, inode) of the socket at path, or nil when it is gone.
+      def identity_of(path)
+        stat = File.stat(path)
+        [stat.dev, stat.ino]
+      rescue SystemCallError
+        nil
+      end
+
+      # True when the path still points at the socket WE bound. False once
+      # a successor has replaced it (or it was removed altogether), which
+      # means the file is not ours to delete.
+      def ours_on_disk?
+        @bound_identity && identity_of(@socket_path) == @bound_identity
+      end
 
       def accept_loop
         while @running

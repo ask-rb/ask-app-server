@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.13] - 2026-09-10
+
+### Fixed
+
+- **A stopped host no longer deletes its successor's socket.** The
+  socket path is a fixed, shared name and hosts overlap: `#start`
+  unlinks a stale path, so a successor launched over a live host takes
+  the name, and the predecessor's later exit (idle timeout, crash,
+  manual kill) ran an unconditional `rm_f` that deleted the path the
+  successor was listening on. Every client after that got ENOENT while
+  the successor stayed alive and looked healthy. The server now records
+  the (device, inode) it bound and removes the file only if it is still
+  that one. Seen in the wild: a host orphaned two weeks earlier was
+  killed during a routine cleanup and silently broke the host that had
+  replaced it.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added
