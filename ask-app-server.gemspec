@@ -27,7 +27,7 @@ Gem::Specification.new do |spec|
   spec.executables = ["ask-app-server"]
   spec.require_paths = ["lib"]
 
-  spec.add_dependency "ask-agent", ">= 0.40.16"
+  spec.add_dependency "ask-agent", ">= 0.40.18"
   spec.add_dependency "ask-core", ">= 0.12.0"
   spec.add_dependency "ask-session-protocol", ">= 0.2.0"
   spec.add_dependency "ask-tools", ">= 0.6.2"
