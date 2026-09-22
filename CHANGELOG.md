@@ -2,30 +2,24 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- **Failure events always wake watchers.** Model stream drops, run
-  failures, and disconnects now reliably emit `turn.failed` with turn
-  identity: `EventTranslator#turn_failed` always carries a `turnId`
-  (the active turn's, or a fresh one when the run died before
-  `turn.started`) — previously a run that failed without an announced
-  turn raised a protocol validation error inside the run thread, the
-  event was swallowed, and every watcher waited forever on a ghost
-  turn. The adapter settles `running` before emitting, so observers
-  woken by `turn.failed` (the herdr pane reporter, session observers)
-  see the run as finished rather than a ghost "working" that no later
-  event corrects, and emission itself is guarded so a translation
-  error can never take down the run thread after the fact. Aborted
-  turns remain client-requested, not failures.
-- **A disconnected watcher cannot starve the others.** `push_pending`
-  isolates delivery per connection: a socket that dies mid-write
-  (EPIPE/ECONNRESET) no longer aborts the whole pass — the remaining
-  subscribed connections still receive their events (including the
-  terminal `turn.failed`), and the dead connection's cursor holds
-  until its reader reaps it.
+## [0.4.21] - 2026-09-22
 
 ### Added
 
+- **Durable ask-session integration — `Ask::Session::Host` is the event
+  source of truth for replay.** `SessionManager` owns one Host
+  (injectable via `SessionManager.new(host:)`, default in-process);
+  every session creates its ask-session record at create time, each
+  canonical protocol event is appended to it at the `EventTranslator`
+  boundary, and `session/events`, subscribe snapshots, and cursor push
+  all read back from the Host — replay no longer depends on the
+  in-memory translator buffer (events survive the buffer cap). Session
+  close closes the durable record (`Host#close`); the wire seq is the
+  Host seq, contiguous from 1. Requires the new runtime dependency
+  `ask-session >= 0.1.0` (the single session store; no second store
+  added). Protocol translation is unchanged and stays in app-server;
+  the JSON-RPC surface, approvals, plans, subscriptions, and
+  `ask-session-protocol` wire behavior are untouched.
 - **Durable restart resume.** `SessionManager.new(state_adapter:)` and
   `AgentAdapter.new(state_adapter:)` accept any ask-state-providers
   adapter; it is wrapped in `Ask::Session::ProviderStore` and handed to
@@ -47,30 +41,33 @@
   turn_count — the payload `SessionAdapter.resume` expects) to the
   Host after a clean turn; failed/aborted turns write none. The
   snapshot is Host-internal and stays off the wire.
-- Fixed durable replay over `ProviderStore`: rehydrated Host events
-  carry symbolized payload keys, which failed protocol payload
-  validation and were silently dropped from `session/events` — the
-  adapter now normalizes payload keys to the string-keyed wire shape
-  at the boundary.
 
-## [0.4.21] - 2026-09-22
+### Fixed
 
-### Added
-
-- **Durable ask-session integration — `Ask::Session::Host` is the event
-  source of truth for replay.** `SessionManager` owns one Host
-  (injectable via `SessionManager.new(host:)`, default in-process);
-  every session creates its ask-session record at create time, each
-  canonical protocol event is appended to it at the `EventTranslator`
-  boundary, and `session/events`, subscribe snapshots, and cursor push
-  all read back from the Host — replay no longer depends on the
-  in-memory translator buffer (events survive the buffer cap). Session
-  close closes the durable record (`Host#close`); the wire seq is the
-  Host seq, contiguous from 1. Requires the new runtime dependency
-  `ask-session >= 0.1.0` (the single session store; no second store
-  added). Protocol translation is unchanged and stays in app-server;
-  the JSON-RPC surface, approvals, plans, subscriptions, and
-  `ask-session-protocol` wire behavior are untouched.
+- **Failure events always wake watchers.** Model stream drops, run
+  failures, and disconnects now reliably emit `turn.failed` with turn
+  identity: `EventTranslator#turn_failed` always carries a `turnId`
+  (the active turn's, or a fresh one when the run died before
+  `turn.started`) — previously a run that failed without an announced
+  turn raised a protocol validation error inside the run thread, the
+  event was swallowed, and every watcher waited forever on a ghost
+  turn. The adapter settles `running` before emitting, so observers
+  woken by `turn.failed` (the herdr pane reporter, session observers)
+  see the run as finished rather than a ghost "working" that no later
+  event corrects, and emission itself is guarded so a translation
+  error can never take down the run thread after the fact. Aborted
+  turns remain client-requested, not failures.
+- **A disconnected watcher cannot starve the others.** `push_pending`
+  isolates delivery per connection: a socket that dies mid-write
+  (EPIPE/ECONNRESET) no longer aborts the whole pass — the remaining
+  subscribed connections still receive their events (including the
+  terminal `turn.failed`), and the dead connection's cursor holds
+  until its reader reaps it.
+- **Durable replay over `ProviderStore`** no longer drops events:
+  rehydrated Host events carry symbolized payload keys, which failed
+  protocol payload validation and were silently dropped from
+  `session/events` — the adapter now normalizes payload keys to the
+  string-keyed wire shape at the boundary.
 
 ### Boundaries (unchanged this slice)
 
@@ -86,8 +83,9 @@
   event; user input enters through `session/send`.
 - **`Host#subscribe` is unused:** delivery stays per-connection cursor
   polling over `Host#events` (any number of clients per session).
-- **`session/resume` remains in-process** (the live adapter). Snapshot
-  based cross-process resume (`SessionAdapter.resume`) is not wired yet.
+- **`session/resume` prefers the live adapter** (in-process, unchanged);
+  only when the registry lacks the session does it fall back to the
+  durable Host snapshot described above.
 - **`SessionStore`'s state-backed event helpers** were never on the wire
   path and are not the replay source; the Host is.
 
