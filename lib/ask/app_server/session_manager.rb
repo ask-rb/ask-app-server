@@ -10,9 +10,12 @@ module Ask
     # across AgentAdapter instances stored in SessionStore.
     #
     # Owns the durable ask-session layer: one Ask::Session::Host shared by
-    # every session (injectable via +host+), which is the event source of
+    # every session (injectable via +host+, or built from an injectable
+    # +state_adapter+ via ProviderStore), which is the event source of
     # truth for replay. SessionStore keeps live adapter registry and
-    # subscription state only.
+    # subscription state only. Resume prefers the live adapter; when the
+    # live registry does not know the session it rebuilds one from the
+    # durable Host ({#resume_session}).
     class SessionManager
       # Default tools if none specified.
       DEFAULT_TOOLS = %w[bash read write edit glob grep].freeze
@@ -29,9 +32,9 @@ module Ask
       attr_reader :blocked_tools
       attr_reader :permission_timeout
 
-      def initialize(store: nil, host: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
+      def initialize(store: nil, host: nil, state_adapter: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
         @store = store || SessionStore.new
-        @host = host || Ask::Session::Host.new
+        @host = host || build_host(state_adapter)
         @permission_mode = permission_mode
         @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
         @permission_timeout = permission_timeout
@@ -67,8 +70,6 @@ module Ask
       def create_session(workspace_path: nil, mode: nil, model: nil, tools: nil, system_prompt: nil)
         approval_opts, plan_mode = resolve_approval(mode)
 
-        # Extract provider prefix from model string (e.g., "opencode_go/deepseek-v4-flash")
-        model_id, model_provider = parse_model_string(model || DEFAULT_MODEL)
         # A provider-qualified model must stay resolvable: the agent's
         # model catalog looks up bare ids, so the prefixed model is
         # registered under its provider before the session builds its
@@ -76,8 +77,7 @@ module Ask
         # bare "deepseek-v4-flash" which the catalog may not know — the
         # session falls back to the wrong provider and the run hangs
         # silently on a missing credential.
-        register_prefixed_model(model_id, model_provider) if model_provider
-        model_for_agent = model_provider ? model_id : (model || DEFAULT_MODEL)
+        model_for_agent = resolve_agent_model(model)
 
         adapter = AgentAdapter.new(
           model: model_for_agent,
@@ -103,6 +103,49 @@ module Ask
         @logger.info("Created session #{session_id} (model=#{model || DEFAULT_MODEL}, approval=#{approval_opts[:mode]})")
 
         session_id
+      end
+
+      # Resume a session: the live adapter when this process still holds
+      # it (in-process resume, unchanged), otherwise rebuild it from the
+      # durable ask-session Host — a fresh compatible agent session under
+      # the same id, restored from its agent.snapshot through
+      # Ask::Agent::SessionAdapter.resume when the Host holds one.
+      #
+      # Model/tool/prompt configuration is not deserialized across
+      # restarts: the rebuilt adapter uses this manager's configured
+      # defaults.
+      #
+      # @return [AgentAdapter]
+      # @raise [SessionNotFound] when neither the live registry nor the
+      #   durable Host knows the session, or its durable record is
+      #   terminal (closed/aborted)
+      def resume_session(session_id)
+        adapter = @store.get(session_id)
+        return adapter if adapter
+
+        record = durable_record(session_id)
+        raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless record
+        unless record.status == :active
+          raise Ask::AppServer::SessionNotFound, "Session #{session_id} is not active"
+        end
+
+        approval_opts, plan_mode = resolve_approval(nil)
+        adapter = AgentAdapter.new(
+          model: resolve_agent_model(nil),
+          tools: DEFAULT_TOOLS,
+          system_prompt: build_default_system_prompt(nil),
+          approval: approval_opts[:mode],
+          require_approval: approval_opts[:require_approval],
+          plan_mode: plan_mode,
+          host: @host,
+          created_at: record.created_at
+        )
+        adapter.resume_from_host(session_id)
+        @store.add(session_id, adapter)
+
+        adapter.on_event { |event| notify_session_event(adapter.session_id, event) }
+        @logger.info("Resumed session #{session_id} from the durable host")
+        adapter
       end
 
       # Remove a session.
@@ -278,6 +321,33 @@ module Ask
       end
 
       private
+
+      # Build the durable Host. With an injectable state adapter (any
+      # ask-state-providers get/set/delete backend) the Host is backed
+      # by ProviderStore, so records, events, and snapshots survive
+      # restarts; without one the default in-memory Host is unchanged.
+      def build_host(state_adapter)
+        return Ask::Session::Host.new unless state_adapter
+
+        Ask::Session::Host.new(store: Ask::Session::ProviderStore.new(adapter: state_adapter))
+      end
+
+      # The durable ask-session record, or nil when the Host does not
+      # know the session.
+      def durable_record(session_id)
+        @host.session(session_id)
+      rescue Ask::Session::NotFoundError
+        nil
+      end
+
+      # Resolve the configured model for a new agent session: parse an
+      # optional provider prefix and register it in the catalog so the
+      # bare id stays resolvable (see create_session).
+      def resolve_agent_model(model)
+        model_id, model_provider = parse_model_string(model || DEFAULT_MODEL)
+        register_prefixed_model(model_id, model_provider) if model_provider
+        model_provider ? model_id : (model || DEFAULT_MODEL)
+      end
 
       # Resolve the session mode into approval options + plan mode.
       #

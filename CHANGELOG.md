@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Durable restart resume.** `SessionManager.new(state_adapter:)` and
+  `AgentAdapter.new(state_adapter:)` accept any ask-state-providers
+  adapter; it is wrapped in `Ask::Session::ProviderStore` and handed to
+  the Host, so records, events, and snapshots survive restarts. No
+  adapter means the default in-memory Host — nothing changes for
+  callers that do not opt in, and no concrete backend is forced.
+- **`session/resume` now falls back to the durable Host.** When the live
+  registry does not know the session, the manager rebuilds a fresh
+  compatible `Ask::Agent::Session` under the same id (configured from
+  the manager's defaults — model/tools/prompt are not serialized), and
+  when the Host holds an `agent.snapshot` restores the conversation
+  through `Ask::Agent::SessionAdapter.resume`. In-process resume (the
+  live adapter) still wins and is unchanged; a terminal (closed)
+  durable record refuses resume with the existing `SessionNotFound`
+  (-32004) error. The restored SessionAdapter's own event handler is
+  detached after restore — the `EventTranslator` remains the single
+  protocol writer, so the wire vocabulary never double-writes.
+- **Successful runs append an `agent.snapshot`** (messages +
+  turn_count — the payload `SessionAdapter.resume` expects) to the
+  Host after a clean turn; failed/aborted turns write none. The
+  snapshot is Host-internal and stays off the wire.
+- Fixed durable replay over `ProviderStore`: rehydrated Host events
+  carry symbolized payload keys, which failed protocol payload
+  validation and were silently dropped from `session/events` — the
+  adapter now normalizes payload keys to the string-keyed wire shape
+  at the boundary.
+
 ## [0.4.21] - 2026-09-22
 
 ### Added

@@ -59,12 +59,14 @@ class SessionHostIntegrationTest < Minitest::Test
     adapter.wait_for_turn(timeout: 2)
 
     durable = @manager.host.events(sid)
-    assert_equal %w[session.created model.streaming], durable.map(&:type)
+    # A clean run appends an agent.snapshot after the wire events; the
+    # snapshot is Host-internal and filtered from wire replay.
+    assert_equal %w[session.created model.streaming agent.snapshot], durable.map(&:type)
     # Durable seq is the wire seq: contiguous from 1.
-    assert_equal [1, 2], durable.map(&:seq)
+    assert_equal [1, 2, 3], durable.map(&:seq)
     # Protocol translation happened at the boundary: the stored payload
     # is the wire shape, not the ask-session vocabulary.
-    assert_equal({ "delta" => "Hi" }, durable.last.payload)
+    assert_equal({ "delta" => "Hi" }, durable[1].payload)
   end
 
   def test_approval_events_are_durable_protocol_events

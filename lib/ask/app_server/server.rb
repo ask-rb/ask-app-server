@@ -347,13 +347,15 @@ module Ask
           { sessions: sessions }
         end
 
-        # Session: resume
+        # Session: resume — the live adapter when this process holds it,
+        # otherwise a durable restart resume: rebuild a fresh agent
+        # session from the Host (restored from its snapshot when one
+        # exists) and attach it to the live registry.
         handler("session/resume") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
           raise InvalidRequest, "sessionId is required" unless session_id
 
-          adapter = @session_manager.get(session_id)
-          raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
+          adapter = @session_manager.resume_session(session_id)
 
           {
             sessionId: session_id,

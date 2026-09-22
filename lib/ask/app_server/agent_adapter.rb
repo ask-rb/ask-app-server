@@ -17,7 +17,10 @@ module Ask
     # an event-sourced log, it knows nothing about the wire vocabulary).
     # Replay and cursor delivery read the Host, so the durable log is the
     # source of truth; the translator's in-memory buffer serves live
-    # observers only.
+    # observers only. A successful run also appends an agent.snapshot
+    # (the ask-agent restart-resume payload); restart resume rebuilds a
+    # fresh session through Ask::Agent::SessionAdapter.resume when the
+    # Host holds one ({#resume_from_host}).
     class AgentAdapter
       # Event types the ask-session Host writes itself (Host#create /
       # Host#close). The adapter must not re-append them: the read path
@@ -52,10 +55,16 @@ module Ask
       #   human approval when approval is :require
       # @param host [Ask::Session::Host, nil] durable session/event host;
       #   defaults to a private in-process Host
+      # @param state_adapter [Object, nil] ask-state-providers adapter
+      #   (get/set/delete) used to construct a ProviderStore-backed Host
+      #   when no +host+ is given; ignored when +host+ is provided
+      # @param created_at [Time, nil] session creation time (restart
+      #   resume passes the durable record's timestamp)
       # @param session_opts [Hash] remaining options passed to
       #   Ask::Agent::Session.new (hooks, plan_mode, todos, ...)
       def initialize(model:, tools: nil, system_prompt: nil, agent_dir: nil,
-                     approval: :off, require_approval: nil, host: nil, **session_opts)
+                     approval: :off, require_approval: nil, host: nil,
+                     state_adapter: nil, created_at: nil, **session_opts)
         @model = model
         @system_prompt = system_prompt
         @tools = resolve_tools(tools)
@@ -63,7 +72,7 @@ module Ask
         @approval = approval
         @require_approval = require_approval
         @agent_dir = agent_dir
-        @host = host || Ask::Session::Host.new
+        @host = host || build_durable_host(state_adapter)
         @durable_record = false
         # The session's workspace is the tools' home: bash commands
         # without an explicit cd run there (default_workdir), so the
@@ -78,7 +87,7 @@ module Ask
         @running_mutex = Mutex.new
         @run_thread = nil
         @abort_requested = false
-        @created_at = Time.now
+        @created_at = created_at || Time.now
         @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG : Logger::WARN)
       end
 
@@ -109,6 +118,21 @@ module Ask
         @translator.on_append = method(:persist_event) if @durable_record
         @session.on_event { |event| handle_agent_event(event) }
         @session_id
+      end
+
+      # Rebuild this adapter around a durable session the Host already
+      # records (restart resume): a fresh compatible ask-agent session
+      # under the same id, restored from the latest agent.snapshot when
+      # one exists, then attached through the regular {#resume} path.
+      #
+      # Model/tools/prompt configuration is intentionally not
+      # deserialized — the caller configures this adapter with its own
+      # defaults before calling.
+      def resume_from_host(session_id)
+        @session = build_session(id: session_id)
+        @session_id = session_id
+        restore_from_snapshot
+        resume(@session)
       end
 
       # Register an observer for every canonical event this session emits
@@ -284,6 +308,46 @@ module Ask
 
       private
 
+      # Build the durable Host from an injectable state adapter (any
+      # ask-state-providers get/set/delete backend, wrapped in
+      # ProviderStore). No adapter means the default in-process Host —
+      # durability is opt-in and no concrete backend is forced.
+      def build_durable_host(state_adapter)
+        return Ask::Session::Host.new unless state_adapter
+
+        Ask::Session::Host.new(store: Ask::Session::ProviderStore.new(adapter: state_adapter))
+      end
+
+      # Restore the conversation from the durable snapshot through
+      # Ask::Agent::SessionAdapter.resume. That adapter registers its
+      # own durable event handler as it attaches, which would append
+      # ask-agent-shaped events alongside this adapter's protocol events
+      # (double-writing the log with a second, non-wire vocabulary) —
+      # restoration is done at that point, so the handler it just added
+      # is popped off and the EventTranslator stays the single protocol
+      # writer.
+      def restore_from_snapshot
+        return false unless durable_snapshot?
+
+        Ask::Agent::SessionAdapter.resume(agent: @session, host: @host, session_id: @session_id)
+        handlers = @session.instance_variable_get(:@event_handlers)
+        handlers[:all].pop if handlers
+        true
+      rescue Ask::Agent::SessionAdapter::Error => e
+        @logger.debug("Snapshot restore skipped for #{@session_id}: #{e.message}")
+        false
+      end
+
+      # Whether the durable Host holds a restart-resume snapshot for
+      # this session.
+      def durable_snapshot?
+        return false unless @host && @session_id
+
+        @host.events(@session_id).any? { |e| e.type == Ask::Agent::SessionAdapter::SNAPSHOT_TYPE }
+      rescue Ask::Session::NotFoundError
+        false
+      end
+
       # Create the durable ask-session record. The Host's own
       # session.created event is the session's first durable event; the
       # translator's session.created (identical wire shape, seq 1) is
@@ -327,6 +391,29 @@ module Ask
         nil
       end
 
+      # Append the end-of-run snapshot the restart-resume path restores
+      # through Ask::Agent::SessionAdapter.resume (same payload shape:
+      # messages + turn_count). Written only after a clean run — an
+      # aborted or failed turn leaves no half-restorable state. The Host
+      # keeps it; wire_event filters it out of protocol replay (it is
+      # not a protocol vocabulary type). Failures never break the live
+      # turn.
+      def persist_snapshot
+        return unless @durable_record
+        return unless @session.respond_to?(:chat) && @session.respond_to?(:turn_count)
+
+        @host.append(
+          @session_id,
+          type: Ask::Agent::SessionAdapter::SNAPSHOT_TYPE,
+          payload: {
+            messages: @session.chat.messages.map(&:to_h),
+            turn_count: @session.turn_count || 0
+          }
+        )
+      rescue StandardError => e
+        @logger.debug("Durable snapshot failed for #{@session_id}: #{e.message}")
+      end
+
       # Rebuild a durable Host record as a canonical wire event.
       # Returns nil for records outside the protocol vocabulary (e.g.
       # ask-session-internal types), which never reach clients.
@@ -341,7 +428,10 @@ module Ask
             reason = record.payload[:reason] || record.payload["reason"] || "closed"
             { "sessionId" => record.session_id, "reason" => reason.to_s }
           else
-            record.payload
+            # Host Event rehydration (and the durable ProviderStore JSON
+            # round-trip) symbolizes payload keys; the wire contract is
+            # string-keyed. Normalize here, at the protocol boundary.
+            record.payload.transform_keys(&:to_s)
           end
         Ask::SessionProtocol::Events.event(type: record.type, seq: record.seq, payload: payload)
       rescue ArgumentError => e
@@ -349,12 +439,13 @@ module Ask
         nil
       end
 
-      def build_session
+      def build_session(id: nil)
         opts = @session_opts.dup
         hooks = opts.delete(:hooks) || {}
         approval_option = build_approval_option
         opts[:approval] = approval_option if approval_option
         opts[:plan_mode] = false unless opts.key?(:plan_mode)
+        opts[:id] = id if id
 
         Ask::Agent::Session.new(
           model: @model,
@@ -409,10 +500,13 @@ module Ask
             # mid-turn (a dead connection, a provider that closed the
             # stream early). Without this, the client would wait on a
             # ghost run forever. Surface it as a failure so the fix
-            # loop can redeliver.
+            # loop can redeliver. No snapshot in that case: the turn's
+            # conversation state is incomplete.
             if @translator.turn_active?
               @logger.error("Turn ended without a completion event — the model stream dropped mid-turn")
               @translator.turn_failed("The model stream ended without completing the turn (the connection dropped mid-stream)")
+            else
+              persist_snapshot
             end
           rescue => e
             # An aborted turn raises Ask::Agent::Aborted — that's not a
