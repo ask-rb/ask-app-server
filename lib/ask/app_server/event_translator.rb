@@ -31,6 +31,13 @@ module Ask
       # side effects (e.g. the pane reporter) hook here.
       attr_accessor :on_event
 
+      # Optional observer called with every emitted canonical Event after
+      # buffering — the persistence hook the adapter uses to append the
+      # event to the durable ask-session Host. Separate from +on_event+
+      # (a single slot) so live observers and durable appends never
+      # clobber each other.
+      attr_accessor :on_append
+
       def initialize
         @events = []
         @seq = 0
@@ -260,6 +267,7 @@ module Ask
         @events << event
         @events.shift if @events.size > MAX_EVENTS
         on_event&.call(event)
+        on_append&.call(event)
         [event]
       end
     end

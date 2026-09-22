@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.21] - 2026-09-22
+
+### Added
+
+- **Durable ask-session integration — `Ask::Session::Host` is the event
+  source of truth for replay.** `SessionManager` owns one Host
+  (injectable via `SessionManager.new(host:)`, default in-process);
+  every session creates its ask-session record at create time, each
+  canonical protocol event is appended to it at the `EventTranslator`
+  boundary, and `session/events`, subscribe snapshots, and cursor push
+  all read back from the Host — replay no longer depends on the
+  in-memory translator buffer (events survive the buffer cap). Session
+  close closes the durable record (`Host#close`); the wire seq is the
+  Host seq, contiguous from 1. Requires the new runtime dependency
+  `ask-session >= 0.1.0` (the single session store; no second store
+  added). Protocol translation is unchanged and stays in app-server;
+  the JSON-RPC surface, approvals, plans, subscriptions, and
+  `ask-session-protocol` wire behavior are untouched.
+
+### Boundaries (unchanged this slice)
+
+- **`Ask::Agent::SessionAdapter` is not attached.** Its `run` lacks the
+  steer/queue/staleness semantics `session/send` depends on, and its
+  event vocabulary (`message.added`, `agent.snapshot`, no
+  `turn.completed`/approval events, non-wire payloads) would double-write
+  and diverge from the canonical contract. The app-server keeps driving
+  runs itself and appends protocol events to the Host directly; its
+  lifecycle surface maps 1:1 (`SessionAdapter#create`/`#close` ≡
+  `Host#create`/`Host#close`).
+- **`Host#send_message` is unused:** the protocol has no `message.added`
+  event; user input enters through `session/send`.
+- **`Host#subscribe` is unused:** delivery stays per-connection cursor
+  polling over `Host#events` (any number of clients per session).
+- **`session/resume` remains in-process** (the live adapter). Snapshot
+  based cross-process resume (`SessionAdapter.resume`) is not wired yet.
+- **`SessionStore`'s state-backed event helpers** were never on the wire
+  path and are not the replay source; the Host is.
+
 ## [0.4.17] - 2026-09-18
 
 ### Changed

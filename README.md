@@ -111,6 +111,11 @@ Every event is a canonical `{type, seq, payload}` envelope, delivered as a
 The full vocabulary, payload shapes, method specs, and versioning live in
 the ask-session-protocol gem (JSON Schema artifact included).
 
+The event log itself is event-sourced in [ask-session](https://github.com/ask-rb/ask-session)'s
+`Host`: replay (`session/events`, subscribe snapshots, cursor push) reads
+the durable log rather than an in-memory buffer, and protocol translation
+stays at the app-server boundary.
+
 ## Clients
 
 Any client that speaks the app-server protocol can connect — including

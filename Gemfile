@@ -18,6 +18,7 @@ monorepo = Dir.exist?(File.expand_path("../ask-core", __dir__))
 if monorepo
   gem "ask-agent", path: "../ask-agent"
   gem "ask-core", path: "../ask-core"
+  gem "ask-session", path: "../ask-session"
   gem "ask-session-protocol", path: "../ask-session-protocol"
   gem "ask-tools", path: "../ask-tools"
   gem "ask-tools-shell", path: "../ask-tools-shell"

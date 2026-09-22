@@ -36,4 +36,11 @@ class GemspecTest < Minitest::Test
     spec = Gem::Specification.load("ask-app-server.gemspec")
     assert spec.dependencies.any? { |d| d.name == "ask-session-protocol" }
   end
+
+  def test_depends_on_ask_session
+    spec = Gem::Specification.load("ask-app-server.gemspec")
+    dep = spec.dependencies.find { |d| d.name == "ask-session" }
+    assert dep, "should depend on ask-session (durable event source)"
+    assert dep.requirement.satisfied_by?(Gem::Version.new("0.1.0"))
+  end
 end

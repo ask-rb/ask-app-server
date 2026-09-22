@@ -8,6 +8,11 @@ module Ask
     # Orchestrates creation, resumption, subscription, messaging, aborting,
     # interaction resolution (approvals, plan), closing, and event polling
     # across AgentAdapter instances stored in SessionStore.
+    #
+    # Owns the durable ask-session layer: one Ask::Session::Host shared by
+    # every session (injectable via +host+), which is the event source of
+    # truth for replay. SessionStore keeps live adapter registry and
+    # subscription state only.
     class SessionManager
       # Default tools if none specified.
       DEFAULT_TOOLS = %w[bash read write edit glob grep].freeze
@@ -19,12 +24,14 @@ module Ask
       DEFAULT_REQUIRE_APPROVAL = %w[write edit bash destroy].freeze
 
       attr_reader :store
+      attr_reader :host
       attr_reader :permission_mode
       attr_reader :blocked_tools
       attr_reader :permission_timeout
 
-      def initialize(store: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
+      def initialize(store: nil, host: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
         @store = store || SessionStore.new
+        @host = host || Ask::Session::Host.new
         @permission_mode = permission_mode
         @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
         @permission_timeout = permission_timeout
@@ -79,7 +86,8 @@ module Ask
           agent_dir: workspace_path,
           approval: approval_opts[:mode],
           require_approval: approval_opts[:require_approval],
-          plan_mode: plan_mode
+          plan_mode: plan_mode,
+          host: @host
         )
 
         session_id = adapter.start_session

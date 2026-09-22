@@ -10,7 +10,21 @@ module Ask
     # owns the approval queue wiring (approval events surface as
     # approval.required / approval.updated) and the interaction controls
     # (approve/reject by id, plan approve/reject) that any client can call.
+    #
+    # The durable ask-session layer: every session has an
+    # Ask::Session::Host record, and each canonical event is appended to
+    # it at this boundary (protocol translation stays here — the Host is
+    # an event-sourced log, it knows nothing about the wire vocabulary).
+    # Replay and cursor delivery read the Host, so the durable log is the
+    # source of truth; the translator's in-memory buffer serves live
+    # observers only.
     class AgentAdapter
+      # Event types the ask-session Host writes itself (Host#create /
+      # Host#close). The adapter must not re-append them: the read path
+      # maps the Host's lifecycle payloads back to the wire shape, which
+      # keeps Host seq and wire seq contiguous from 1.
+      HOST_OWNED_EVENT_TYPES = %w[session.created session.ended].freeze
+
       # The underlying ask-agent session.
       attr_reader :session
 
@@ -19,6 +33,9 @@ module Ask
 
       # The session ID (same as ask-agent session id).
       attr_reader :session_id
+
+      # The durable ask-session host this session's records live in.
+      attr_reader :host
 
       # Whether a turn is currently in progress.
       attr_reader :running
@@ -33,10 +50,12 @@ module Ask
       # @param approval [Symbol] :off, :require, or :auto
       # @param require_approval [Array<String>, nil] tool names gated behind
       #   human approval when approval is :require
+      # @param host [Ask::Session::Host, nil] durable session/event host;
+      #   defaults to a private in-process Host
       # @param session_opts [Hash] remaining options passed to
       #   Ask::Agent::Session.new (hooks, plan_mode, todos, ...)
       def initialize(model:, tools: nil, system_prompt: nil, agent_dir: nil,
-                     approval: :off, require_approval: nil, **session_opts)
+                     approval: :off, require_approval: nil, host: nil, **session_opts)
         @model = model
         @system_prompt = system_prompt
         @tools = resolve_tools(tools)
@@ -44,6 +63,8 @@ module Ask
         @approval = approval
         @require_approval = require_approval
         @agent_dir = agent_dir
+        @host = host || Ask::Session::Host.new
+        @durable_record = false
         # The session's workspace is the tools' home: bash commands
         # without an explicit cd run there (default_workdir), so the
         # agent never drifts into the host's cwd — the recurring
@@ -68,6 +89,8 @@ module Ask
         @translator.on_event = @on_event_block if @on_event_block
         @session = build_session
         @session_id = @session.id
+        create_durable_record
+        @translator.on_append = method(:persist_event)
         @session.on_event { |event| handle_agent_event(event) }
         @translator.session_created(@session_id)
         @session_id
@@ -79,6 +102,11 @@ module Ask
         @session_id = session.id
         @translator = EventTranslator.new
         @translator.on_event = @on_event_block if @on_event_block
+        # Attach to the durable record when the Host already knows this
+        # session (full history stays replayable); otherwise this adapter
+        # runs translator-buffer-only, as before.
+        @durable_record = durable_record?
+        @translator.on_append = method(:persist_event) if @durable_record
         @session.on_event { |event| handle_agent_event(event) }
         @session_id
       end
@@ -209,10 +237,12 @@ module Ask
 
       # ── Lifecycle ───────────────────────────────────────────────────────
 
-      # Close the session: delete its state and emit session.ended.
+      # Close the session: delete its state, emit session.ended, and
+      # close the durable ask-session record.
       def close!
         @session&.delete if @session.respond_to?(:delete)
         @translator&.session_ended(@session_id, reason: "closed")
+        close_durable_record
         true
       end
 
@@ -237,11 +267,87 @@ module Ask
       end
 
       # Events after a given sequence number.
+      #
+      # The durable ask-session log is the source of truth: replay and
+      # cursor delivery read Host#events and re-validate each record as a
+      # canonical protocol event at this boundary. Falls back to the
+      # in-memory translator buffer only when this adapter has no durable
+      # record (resume() attached to a session the Host does not know).
       def events_after(after_seq)
-        pending_events.select { |e| e.seq > after_seq }
+        after = after_seq.to_i
+        return pending_events.select { |e| e.seq > after } unless @durable_record
+
+        @host.events(@session_id, after_seq: after).filter_map { |record| wire_event(record) }
+      rescue Ask::Session::NotFoundError
+        pending_events.select { |e| e.seq > after }
       end
 
       private
+
+      # Create the durable ask-session record. The Host's own
+      # session.created event is the session's first durable event; the
+      # translator's session.created (identical wire shape, seq 1) is
+      # served from it via #wire_event instead of being re-appended.
+      def create_durable_record
+        @host.create(id: @session_id, metadata: { model: @model })
+        @durable_record = true
+      end
+
+      # Whether the Host already holds a record for this session.
+      def durable_record?
+        return false unless @host && @session_id
+
+        @host.session(@session_id)
+        true
+      rescue Ask::Session::NotFoundError
+        false
+      end
+
+      # Append a canonical protocol event to the durable Host. The Host is
+      # a dumb log: protocol vocabulary enters and leaves at this
+      # boundary. Host-owned lifecycle events are skipped (see
+      # HOST_OWNED_EVENT_TYPES). Failures never break live delivery — a
+      # close racing a run just stops receiving durable appends.
+      def persist_event(event)
+        return unless @durable_record
+        return if HOST_OWNED_EVENT_TYPES.include?(event.type)
+
+        @host.append(@session_id, type: event.type, payload: event.payload)
+      rescue StandardError => e
+        @logger.debug("Durable append failed for #{event.type}: #{e.message}")
+      end
+
+      # Close the durable record (Host writes session.ended itself).
+      # Already-closed/aborted records are fine to ignore.
+      def close_durable_record
+        return unless @durable_record
+
+        @host.close(@session_id, reason: "closed")
+      rescue Ask::Session::Error
+        nil
+      end
+
+      # Rebuild a durable Host record as a canonical wire event.
+      # Returns nil for records outside the protocol vocabulary (e.g.
+      # ask-session-internal types), which never reach clients.
+      def wire_event(record)
+        return nil unless Ask::SessionProtocol::Events.known?(record.type)
+
+        payload =
+          case record.type
+          when "session.created"
+            { "sessionId" => record.session_id }
+          when "session.ended"
+            reason = record.payload[:reason] || record.payload["reason"] || "closed"
+            { "sessionId" => record.session_id, "reason" => reason.to_s }
+          else
+            record.payload
+          end
+        Ask::SessionProtocol::Events.event(type: record.type, seq: record.seq, payload: payload)
+      rescue ArgumentError => e
+        @logger.debug("Skipping non-wire durable event #{record.type}: #{e.message}")
+        nil
+      end
 
       def build_session
         opts = @session_opts.dup

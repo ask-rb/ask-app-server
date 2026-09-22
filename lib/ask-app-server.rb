@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "ask/agent"
+require "ask-session"
 require "ask-session-protocol"
 require "ask-tools-shell"
 

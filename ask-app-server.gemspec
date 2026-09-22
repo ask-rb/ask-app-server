@@ -29,6 +29,7 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "ask-agent", ">= 0.40.19"
   spec.add_dependency "ask-core", ">= 0.12.0"
+  spec.add_dependency "ask-session", ">= 0.1.0"
   spec.add_dependency "ask-session-protocol", ">= 0.2.0"
   spec.add_dependency "ask-tools", ">= 0.6.2"
   spec.add_dependency "ask-tools-shell", ">= 0.6.1"
