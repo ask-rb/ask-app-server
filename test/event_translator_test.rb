@@ -97,6 +97,48 @@ class EventTranslatorTest < Minitest::Test
     assert_match(/Loop detected on tool: bash/, events[0].payload["error"])
   end
 
+  # ── Failure identity ───────────────────────────────────────────────────
+
+  def test_turn_failed_uses_the_active_turn_identity
+    started = @translator.translate(Ask::Agent::Events::TurnStart.new)[0]
+
+    events = @translator.translate(Ask::Agent::Events::MaxTurnsExceeded.new(max_turns: 5))
+
+    assert_equal "turn.failed", events[0].type
+    assert_equal started.payload["turnId"], events[0].payload["turnId"],
+                 "a failure of a started turn correlates by that turn's id"
+    refute @translator.turn_active?
+  end
+
+  def test_turn_failed_without_a_started_turn_still_carries_identity
+    # The protocol requires turnId: a run that dies before TurnStart
+    # must still emit (and must not raise at the validation boundary —
+    # a raised emission would swallow the event and hang every watcher).
+    events = @translator.turn_failed("provider went away")
+
+    assert_equal 1, events.length
+    assert_equal "turn.failed", events[0].type
+    assert_equal "provider went away", events[0].payload["error"]
+    refute_empty events[0].payload["turnId"]
+    refute @translator.turn_active?
+  end
+
+  def test_turn_failed_after_a_completed_turn_does_not_reuse_stale_identity
+    started = @translator.translate(Ask::Agent::Events::TurnStart.new)[0]
+    @translator.translate(
+      Ask::Agent::Events::SessionEnd.new(
+        result: "ok", turn_count: 1, tool_calls_made: 0,
+        input_tokens: 1, output_tokens: 1, cost: 0.0
+      )
+    )
+
+    events = @translator.turn_failed("late run failure")
+
+    refute_equal started.payload["turnId"], events[0].payload["turnId"],
+                 "the completed turn's id is spent; a new failure gets fresh identity"
+    refute_empty events[0].payload["turnId"]
+  end
+
   def test_error_emits_error_event
     events = @translator.translate(Ask::Agent::Events::Error.new(error: "boom", recoverable: true))
     assert_equal "error", events[0].type

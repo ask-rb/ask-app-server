@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Failure events always wake watchers.** Model stream drops, run
+  failures, and disconnects now reliably emit `turn.failed` with turn
+  identity: `EventTranslator#turn_failed` always carries a `turnId`
+  (the active turn's, or a fresh one when the run died before
+  `turn.started`) — previously a run that failed without an announced
+  turn raised a protocol validation error inside the run thread, the
+  event was swallowed, and every watcher waited forever on a ghost
+  turn. The adapter settles `running` before emitting, so observers
+  woken by `turn.failed` (the herdr pane reporter, session observers)
+  see the run as finished rather than a ghost "working" that no later
+  event corrects, and emission itself is guarded so a translation
+  error can never take down the run thread after the fact. Aborted
+  turns remain client-requested, not failures.
+- **A disconnected watcher cannot starve the others.** `push_pending`
+  isolates delivery per connection: a socket that dies mid-write
+  (EPIPE/ECONNRESET) no longer aborts the whole pass — the remaining
+  subscribed connections still receive their events (including the
+  terminal `turn.failed`), and the dead connection's cursor holds
+  until its reader reaps it.
+
 ### Added
 
 - **Durable restart resume.** `SessionManager.new(state_adapter:)` and

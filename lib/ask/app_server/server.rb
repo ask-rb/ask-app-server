@@ -193,23 +193,32 @@ module Ask
       # several sessions, and the client routes events to the right
       # watcher — without it, a multi-session client would record one
       # session's events into another's run.
+      #
+      # Delivery is isolated per connection: a watcher whose socket died
+      # mid-write (EPIPE/ECONNRESET) must not abort the pass and starve
+      # the remaining watchers of their terminal events. The failed
+      # connection's cursor does not advance, so undelivered events
+      # redeliver on the next pass (clients dedup by seq); its reader
+      # thread reaps the dead connection on EOF.
       def push_pending
         connections.each do |connection|
           connection.subscriptions.keys.each do |session_id|
-            adapter = @session_manager.get(session_id)
-            next unless adapter
+            begin
+              adapter = @session_manager.get(session_id)
+              next unless adapter
 
-            events = adapter.events_after(connection.cursor(session_id))
-            next if events.empty?
+              events = adapter.events_after(connection.cursor(session_id))
+              next if events.empty?
 
-            events.each do |ev|
-              connection.write({ method: "session/event", params: { sessionId: session_id, event: ev.to_h } })
+              events.each do |ev|
+                connection.write({ method: "session/event", params: { sessionId: session_id, event: ev.to_h } })
+              end
+              connection.advance(session_id, events.last.seq)
+            rescue => e
+              @logger.debug("Push error: #{e.message}") if ENV["DEBUG"]
             end
-            connection.advance(session_id, events.last.seq)
           end
         end
-      rescue => e
-        @logger.debug("Push error: #{e.message}") if ENV["DEBUG"]
       end
 
       # ── Response/notification helpers ──────────────────────────────────

@@ -462,6 +462,49 @@ class ServerTest < Minitest::Test
     assert output_b.string.empty?, "connection B should receive nothing"
   end
 
+  def test_push_pending_survives_a_disconnected_watcher
+    # A fresh server so connection order is controlled: the dead
+    # watcher is registered FIRST — before the fix its EPIPE aborted
+    # the whole pass and the live watcher never woke.
+    manager = Ask::AppServer::SessionManager.new
+    server = Ask::AppServer::Server.new(session_manager: manager)
+    session_id = manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
+
+    dead = server.add_connection(
+      Ask::AppServer::Connection.new(StringIO.new(""), DeadWatcherOutput.new)
+    )
+    dead.subscribe(session_id, after_seq: 0)
+
+    live_output = StringIO.new
+    live = server.add_connection(
+      Ask::AppServer::Connection.new(StringIO.new(""), live_output)
+    )
+    live.subscribe(session_id, after_seq: 0)
+
+    server.push_pending
+
+    notifications = live_output.string.lines.map { |line| JSON.parse(line) }
+    assert notifications.any? { |n| n["method"] == "session/event" },
+           "a live watcher still receives events after a peer disconnects"
+    assert_equal 0, dead.cursor(session_id),
+                 "the dead watcher's cursor does not advance past undelivered events"
+
+    # Subsequent passes keep working: the dead watcher never breaks
+    # delivery for anyone (its own events redeliver, others advance).
+    server.push_pending
+    assert_equal 1, live.cursor(session_id)
+    assert_equal 0, dead.cursor(session_id)
+  end
+
+  # An output whose writes fail the way a disconnected socket does.
+  class DeadWatcherOutput
+    def puts(*)
+      raise Errno::EPIPE
+    end
+
+    def flush; end
+  end
+
   private
 
   def handle(method, params = {}, id: nil)

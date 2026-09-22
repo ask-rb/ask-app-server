@@ -158,6 +158,25 @@ class SessionHostIntegrationTest < Minitest::Test
 
   # ── Close ──────────────────────────────────────────────────────────────
 
+  def test_run_failure_is_durable_and_replayable
+    sid = @manager.create_session(model: "gpt-4o")
+    adapter = @manager.get(sid)
+    adapter.session.stubs(:run).raises(RuntimeError, "provider exploded")
+
+    @manager.send_message(sid, "Hello")
+    assert adapter.wait_for_turn(timeout: 2)
+
+    # A watcher polling (or replaying after a reconnect) finds the
+    # terminal failure in the durable log — not just the live buffer.
+    events = @manager.get_events(sid, after_seq: 1)[:events]
+    failure = events.find { |e| e.type == "turn.failed" }
+    assert failure, "turn.failed must be served from the durable log"
+    assert_match(/provider exploded/, failure.payload["error"])
+    refute_empty failure.payload["turnId"]
+
+    assert_includes @manager.host.events(sid).map(&:type), "turn.failed"
+  end
+
   def test_close_session_closes_the_durable_record
     sid = @manager.create_session(model: "gpt-4o")
     adapter = @manager.get(sid)
