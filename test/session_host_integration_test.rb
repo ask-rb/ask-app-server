@@ -73,7 +73,7 @@ class SessionHostIntegrationTest < Minitest::Test
     sid = @manager.create_session(model: "gpt-4o")
     adapter = @manager.get(sid)
 
-    queue = Ask::Agent::ApprovalQueue.new
+    queue = Ask::Permissions::ApprovalQueue.new
     id = queue.submit(tool_call_id: "call-1", tool_name: "bash", args: { "command" => "ls" })
     adapter.translator.approval_required(queue[id])
 

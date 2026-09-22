@@ -95,7 +95,7 @@ module Ask
 
       # An approval action was queued: emit approval.required.
       #
-      # @param action [Ask::Agent::ApprovalQueue::Action]
+      # @param action [Ask::Permissions::ApprovalQueue::Action]
       def approval_required(action)
         payload = { "toolName" => action.tool_name.to_s }
         payload["args"] = action.args if action.args
@@ -106,7 +106,7 @@ module Ask
 
       # An approval action changed status: emit approval.updated.
       #
-      # @param action [Ask::Agent::ApprovalQueue::Action]
+      # @param action [Ask::Permissions::ApprovalQueue::Action]
       def approval_updated(action)
         status = action.status.to_s
         return unless %w[approved rejected].include?(status)
