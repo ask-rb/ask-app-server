@@ -53,6 +53,25 @@ class SessionManagerTest < Minitest::Test
     assert_includes session_ids, sid2
   end
 
+  def test_sqlite_sessions_are_listed_after_restart
+    require "tmpdir"
+    require "ask/state/providers/sqlite"
+
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "sessions.sqlite3")
+      state = Ask::State::Providers::SQLite.new(path: path)
+      manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+      session_id = manager.create_session(model: "gpt-4o")
+      state.close
+
+      reopened = Ask::State::Providers::SQLite.new(path: path)
+      restarted = Ask::AppServer::SessionManager.new(state_adapter: reopened)
+
+      assert_includes restarted.list_sessions.map { |session| session[:sessionId] }, session_id
+      reopened.close
+    end
+  end
+
   def test_send_message_requires_session
     assert_raises(Ask::AppServer::SessionNotFound) do
       @manager.send_message("nonexistent", "hello")

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Durable session listings survive restart.** When `state_adapter:` is
+  configured, the app-server session registry now uses the same persistent
+  adapter as the ask-session Host, so SQLite and PostgreSQL sessions remain
+  discoverable through `session/list` after restart. Reattaching a durable
+  session no longer reports it as a duplicate live session.
+
 ## [0.4.21] - 2026-09-22
 
 ### Added
