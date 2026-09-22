@@ -40,10 +40,12 @@ module Ask
 
         @mutex.synchronize do
           existing = @state.get("#{SESSION_PREFIX}#{session_id}")
-          raise Ask::AppServer::SessionAlreadyExists, "Session #{session_id} already exists" if existing
+          if existing && @adapters.key?(session_id)
+            raise Ask::AppServer::SessionAlreadyExists, "Session #{session_id} already exists"
+          end
 
           @state.set("#{SESSION_PREFIX}#{session_id}", metadata)
-          @state.list_append(SESSION_LIST_KEY, session_id, max_length: 200)
+          @state.list_append(SESSION_LIST_KEY, session_id, max_length: 200) unless existing
           @adapters[session_id] = adapter
         end
       end
@@ -75,7 +77,7 @@ module Ask
           metadata = @state.get("#{SESSION_PREFIX}#{sid}")
           if metadata
             adapter = @adapters[sid]
-            metadata.merge(
+            metadata.transform_keys(&:to_sym).merge(
               running: adapter&.running || false,
               idle: adapter&.idle? || true
             )

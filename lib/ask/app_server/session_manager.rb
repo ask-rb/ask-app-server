@@ -33,7 +33,7 @@ module Ask
       attr_reader :permission_timeout
 
       def initialize(store: nil, host: nil, state_adapter: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
-        @store = store || SessionStore.new
+        @store = store || SessionStore.new(state: state_adapter)
         @host = host || build_host(state_adapter)
         @permission_mode = permission_mode
         @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
