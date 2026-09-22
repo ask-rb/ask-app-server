@@ -462,6 +462,99 @@ class ServerTest < Minitest::Test
     assert output_b.string.empty?, "connection B should receive nothing"
   end
 
+  def test_push_pending_survives_a_disconnected_watcher
+    # A fresh server so connection order is controlled: the dead
+    # watcher is registered FIRST — before the fix its EPIPE aborted
+    # the whole pass and the live watcher never woke.
+    manager = Ask::AppServer::SessionManager.new
+    server = Ask::AppServer::Server.new(session_manager: manager)
+    session_id = manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
+
+    dead = server.add_connection(
+      Ask::AppServer::Connection.new(StringIO.new(""), DeadWatcherOutput.new)
+    )
+    dead.subscribe(session_id, after_seq: 0)
+
+    live_output = StringIO.new
+    live = server.add_connection(
+      Ask::AppServer::Connection.new(StringIO.new(""), live_output)
+    )
+    live.subscribe(session_id, after_seq: 0)
+
+    server.push_pending
+
+    notifications = live_output.string.lines.map { |line| JSON.parse(line) }
+    assert notifications.any? { |n| n["method"] == "session/event" },
+           "a live watcher still receives events after a peer disconnects"
+    assert_equal 0, dead.cursor(session_id),
+                 "the dead watcher's cursor does not advance past undelivered events"
+
+    # Subsequent passes keep working: the dead watcher never breaks
+    # delivery for anyone (its own events redeliver, others advance).
+    server.push_pending
+    assert_equal 1, live.cursor(session_id)
+    assert_equal 0, dead.cursor(session_id)
+  end
+
+  # ── Failure events reach subscribed wire watchers ─────────────────────
+
+  # Model stream drops, run failures, and disconnects all funnel through
+  # the adapter's terminal-failure path. A subscribed watcher must
+  # receive each as a session/event notification carrying the session
+  # (envelope), the turn identity, and the error — the triple a client
+  # needs to settle the run instead of waiting on a ghost forever.
+  def test_model_stream_drop_reaches_wire_watcher
+    session_id, failure, started = capture_wire_failure(announce_turn: true) do |session|
+      # The run returns but the turn never completed: the stream dropped.
+      session.stubs(:run).returns("done")
+    end
+
+    assert_equal session_id, failure.dig("params", "sessionId")
+    assert started, "the dropped turn announced itself on the wire"
+    assert_equal started.dig("params", "event", "payload", "turnId"),
+                 failure.dig("params", "event", "payload", "turnId"),
+                 "the failure correlates to the dropped turn by turnId"
+    assert_match(/stream ended without completing/,
+                 failure.dig("params", "event", "payload", "error"))
+  end
+
+  def test_run_failure_reaches_wire_watcher
+    session_id, failure, = capture_wire_failure do |session|
+      # The run dies before turn.started: no turn announced itself, but
+      # the watcher still gets a fresh, protocol-valid identity.
+      session.stubs(:run).raises(RuntimeError, "provider exploded")
+    end
+
+    assert_equal session_id, failure.dig("params", "sessionId")
+    refute_empty failure.dig("params", "event", "payload", "turnId"),
+                 "a run that dies before turn.started still carries identity"
+    assert_match(/provider exploded/,
+                 failure.dig("params", "event", "payload", "error"))
+  end
+
+  def test_disconnect_reaches_wire_watcher
+    session_id, failure, started = capture_wire_failure(announce_turn: true) do |session|
+      # The model connection drops mid-run: the provider raises EOF.
+      session.stubs(:run).raises(EOFError, "end of file reached")
+    end
+
+    assert_equal session_id, failure.dig("params", "sessionId")
+    assert started, "the interrupted turn announced itself on the wire"
+    assert_equal started.dig("params", "event", "payload", "turnId"),
+                 failure.dig("params", "event", "payload", "turnId")
+    assert_match(/end of file reached/,
+                 failure.dig("params", "event", "payload", "error"))
+  end
+
+  # An output whose writes fail the way a disconnected socket does.
+  class DeadWatcherOutput
+    def puts(*)
+      raise Errno::EPIPE
+    end
+
+    def flush; end
+  end
+
   private
 
   def handle(method, params = {}, id: nil)
@@ -490,6 +583,39 @@ class ServerTest < Minitest::Test
 
   def create_test_session
     @session_manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
+  end
+
+  # Subscribe a watcher, drive one terminal run failure through the
+  # adapter, and return [session_id, turn.failed notification,
+  # turn.started notification]. Asserts the run settles before the
+  # delivery pass — the wake watchers depend on — so the notification
+  # observed here is the one a real client receives.
+  def capture_wire_failure(announce_turn: false)
+    session_id = create_test_session
+    adapter = @session_manager.get(session_id)
+
+    handle("session/subscribe", { sessionId: session_id }, id: 2)
+    read_response
+    clear_output!
+
+    # Announce a turn when the scenario started one (stream drop,
+    # mid-run disconnect): the failure must correlate by that turnId.
+    adapter.session.emit(Ask::Agent::Events::TurnStart.new) if announce_turn
+    yield adapter.session
+
+    handle("session/send", { sessionId: session_id, content: "Hello" }, id: 3)
+    read_response
+    assert adapter.wait_for_turn(timeout: 2), "the run thread must settle"
+    refute adapter.running, "watchers wake with the run already settled"
+
+    @server.push_pending
+
+    notifications = @output.string.lines.map { |line| JSON.parse(line.strip) }
+    failure = notifications.find { |n| n.dig("params", "event", "type") == "turn.failed" }
+    assert failure, "the subscribed watcher must be pushed turn.failed"
+
+    started = notifications.find { |n| n.dig("params", "event", "type") == "turn.started" }
+    [session_id, failure, started]
   end
 
   public

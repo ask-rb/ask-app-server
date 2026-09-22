@@ -126,6 +126,30 @@ class SessionManagerTest < Minitest::Test
     assert_equal "stale", result[:status]
   end
 
+  # ── Failure events wake session observers ──────────────────────────────
+
+  def test_run_failure_wakes_session_event_observers_with_turn_failed
+    session_id = @manager.create_session(model: "gpt-4o")
+    adapter = @manager.get(session_id)
+    adapter.session.stubs(:run).raises(RuntimeError, "provider exploded")
+
+    woken = []
+    @manager.on_session_event do |sid, event|
+      next unless event.type == "turn.failed"
+
+      woken << { session_id: sid, event: event, running: adapter.running }
+    end
+
+    @manager.send_message(session_id, "Hello")
+    assert adapter.wait_for_turn(timeout: 2)
+
+    assert_equal 1, woken.size, "the failure must reach session observers"
+    assert_equal session_id, woken[0][:session_id]
+    assert_match(/provider exploded/, woken[0][:event].payload["error"])
+    refute_empty woken[0][:event].payload["turnId"]
+    refute woken[0][:running], "observers wake with the run already settled"
+  end
+
   # ── Interactions ───────────────────────────────────────────────────────
 
   def test_interaction_controls_delegate_to_adapter

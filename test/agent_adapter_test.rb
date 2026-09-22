@@ -235,6 +235,97 @@ class AgentAdapterTest < Minitest::Test
     assert adapter2.translator
   end
 
+  # ── Failure events (stream drops, run failures, disconnects) ───────────
+
+  def test_model_stream_drop_emits_turn_failed_with_turn_identity
+    @adapter.start_session
+    observed = []
+    woken_running = nil
+    @adapter.on_event do |event|
+      observed << event
+      woken_running = @adapter.running if event.type == "turn.failed"
+    end
+
+    # Announce the turn, then let the run return without a terminal
+    # event — the model stream dropped mid-turn.
+    @adapter.session.emit(Ask::Agent::Events::TurnStart.new)
+    started = observed.find { |e| e.type == "turn.started" }
+    @adapter.session.stubs(:run).returns("done")
+    @adapter.session.stubs(:queued_steers).returns(0)
+
+    @adapter.send_message("Hello")
+    assert @adapter.wait_for_turn(timeout: 2)
+
+    failure = observed.find { |e| e.type == "turn.failed" }
+    assert failure, "a stream drop must wake watchers with turn.failed"
+    assert_equal started.payload["turnId"], failure.payload["turnId"]
+    assert_match(/stream ended without completing/, failure.payload["error"])
+    refute @adapter.translator.turn_active?
+    refute woken_running, "watchers wake with the run already settled"
+    refute @adapter.running
+  end
+
+  def test_run_failure_emits_turn_failed_with_identity
+    @adapter.start_session
+    observed = []
+    woken_running = nil
+    @adapter.on_event do |event|
+      observed << event
+      woken_running = @adapter.running if event.type == "turn.failed"
+    end
+
+    # The run dies before TurnStart: no turn announced itself, but the
+    # protocol still requires turnId — the failure must carry a fresh
+    # identity instead of raising and vanishing with the run thread.
+    @adapter.session.stubs(:run).raises(RuntimeError, "provider exploded")
+
+    @adapter.send_message("Hello")
+    assert @adapter.wait_for_turn(timeout: 2)
+
+    failure = observed.find { |e| e.type == "turn.failed" }
+    assert failure, "a run failure must wake watchers with turn.failed"
+    assert_match(/provider exploded/, failure.payload["error"])
+    refute_empty failure.payload["turnId"]
+    refute woken_running, "watchers wake with the run already settled"
+    refute @adapter.translator.turn_active?
+  end
+
+  def test_disconnect_during_run_emits_turn_failed_with_turn_identity
+    @adapter.start_session
+    observed = []
+    @adapter.on_event { |event| observed << event }
+
+    @adapter.session.emit(Ask::Agent::Events::TurnStart.new)
+    started = observed.find { |e| e.type == "turn.started" }
+
+    # The model connection drops mid-run: the provider raises EOF.
+    @adapter.session.stubs(:run).raises(EOFError, "end of file reached")
+
+    @adapter.send_message("Hello")
+    assert @adapter.wait_for_turn(timeout: 2)
+
+    failure = observed.find { |e| e.type == "turn.failed" }
+    assert failure, "a disconnect must wake watchers with turn.failed"
+    assert_equal started.payload["turnId"], failure.payload["turnId"]
+    assert_match(/end of file reached/, failure.payload["error"])
+    refute @adapter.translator.turn_active?
+  end
+
+  def test_aborted_run_does_not_emit_turn_failed
+    @adapter.start_session
+    observed = []
+    @adapter.on_event { |event| observed << event }
+
+    @adapter.session.stubs(:run).raises(Ask::Agent::Aborted, "client aborted")
+
+    @adapter.send_message("Hello")
+    assert @adapter.wait_for_turn(timeout: 2)
+
+    refute observed.any? { |e| e.type == "turn.failed" },
+           "an abort is client-requested, not a failure"
+    refute @adapter.running
+  end
+
   private
 
   # A fake session whose approval queue is a real, inert ApprovalQueue

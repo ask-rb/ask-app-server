@@ -488,6 +488,7 @@ module Ask
         end
 
         @run_thread = Thread.new do
+          failure = nil
           begin
             @session.run(content, reset: false)
             # Drain steers queued while the turn was running (mid-execution
@@ -504,27 +505,48 @@ module Ask
             # conversation state is incomplete.
             if @translator.turn_active?
               @logger.error("Turn ended without a completion event — the model stream dropped mid-turn")
-              @translator.turn_failed("The model stream ended without completing the turn (the connection dropped mid-stream)")
+              failure = "The model stream ended without completing the turn (the connection dropped mid-stream)"
             else
               persist_snapshot
             end
           rescue => e
             # An aborted turn raises Ask::Agent::Aborted — that's not a
-            # failure, the client asked for it. Everything else is a real
-            # run failure the client must see: without a turn.failed, a
-            # watching board would wait forever on a dead turn. The
+            # failure, the client asked for it. Everything else is a
+            # run failure the client must see — a raised run, or a
+            # disconnect from the model (EOF, ECONNRESET, a closed
+            # socket) surfaced as an exception: without a turn.failed,
+            # a watching board would wait forever on a dead turn. The
             # translator's failure event carries the message.
             unless e.is_a?(Ask::Agent::Aborted) || e.class.name.to_s.include?("Aborted")
               @logger.error("Agent run failed: #{e.class}: #{e.message}")
-              @translator.turn_failed(e.message.to_s[0, 500])
+              message = e.message.to_s
+              message = e.class.name if message.strip.empty?
+              failure = message[0, 500]
             end
           ensure
+            # Settle the run before the terminal event goes out: a
+            # watcher woken by turn.failed (an observer, the pane
+            # reporter) must see the run as finished, not a ghost
+            # "working" it will never see corrected — no state event
+            # fires after this point.
             @running_mutex.synchronize { @running = false }
+            emit_failure(failure) if failure
             @logger.debug("Run thread ended: turn_active=#{@translator.turn_active?} last_seq=#{@translator.last_seq}")
           end
         end
 
         true
+      end
+
+      # Wake the watchers: translate the run's terminal failure into a
+      # turn.failed event. Never raises — if emission itself failed, a
+      # raised error here would kill the run thread after the fact and
+      # leave the turn marked active with no terminal event, hanging
+      # every watcher this method exists to wake.
+      def emit_failure(message)
+        @translator.turn_failed(message)
+      rescue StandardError => e
+        @logger.error("Failed to emit turn.failed: #{e.class}: #{e.message}")
       end
 
       def handle_agent_event(event)

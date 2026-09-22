@@ -158,12 +158,20 @@ module Ask
       end
 
       # Emit a turn.failed event. Called by the adapter when a run dies
-      # (an exception, or a stream that ended without completing).
+      # (an exception, a disconnect, or a stream that ended without
+      # completing).
+      #
+      # The protocol requires turnId, so the payload always carries
+      # identity: the active turn's id when the turn announced itself,
+      # a fresh one when the run died before TurnStart (or after the
+      # previous turn ended — that id is spent and must not be reused).
+      # Emitting without one would raise at the protocol boundary, the
+      # event would never reach the buffer, and every watcher of the
+      # dead run would wait forever.
       def turn_failed(message)
+        @turn_id = SecureRandom.uuid unless @turn_active && @turn_id
         @turn_active = false
-        payload = { "error" => message.to_s }
-        payload["turnId"] = @turn_id if @turn_id
-        emit("turn.failed", payload)
+        emit("turn.failed", { "error" => message.to_s, "turnId" => @turn_id })
       end
 
       private
