@@ -332,17 +332,17 @@ class AgentAdapterTest < Minitest::Test
   # (no session callbacks wired): queue mechanics are exercised without
   # triggering tool execution or LLM calls.
   def session_with_approval_queue
-    queue = Ask::Agent::ApprovalQueue.new
+    queue = Ask::Permissions::ApprovalQueue.new
     session = fake_agent_session
     session.stubs(:approval_queue).returns(queue)
-    session.stubs(:plan_queue).returns(Ask::Agent::ApprovalQueue.new)
+    session.stubs(:plan_queue).returns(Ask::Permissions::ApprovalQueue.new)
     [session, queue]
   end
 
   def session_with_plan_queue
-    plan_queue = Ask::Agent::ApprovalQueue.new
+    plan_queue = Ask::Permissions::ApprovalQueue.new
     session = fake_agent_session
-    session.stubs(:approval_queue).returns(Ask::Agent::ApprovalQueue.new)
+    session.stubs(:approval_queue).returns(Ask::Permissions::ApprovalQueue.new)
     session.stubs(:plan_queue).returns(plan_queue)
     [session, plan_queue]
   end

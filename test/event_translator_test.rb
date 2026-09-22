@@ -210,7 +210,7 @@ class EventTranslatorTest < Minitest::Test
   # ── Approvals (queue-driven) ───────────────────────────────────────────
 
   def test_approval_required_and_updated
-    queue = Ask::Agent::ApprovalQueue.new
+    queue = Ask::Permissions::ApprovalQueue.new
     id = queue.submit(tool_call_id: "call-1", tool_name: "bash", args: { "command" => "ls" }, message: "dangerous")
 
     @translator.approval_required(queue[id])
@@ -229,7 +229,7 @@ class EventTranslatorTest < Minitest::Test
   end
 
   def test_approval_updated_ignores_unknown_statuses
-    queue = Ask::Agent::ApprovalQueue.new
+    queue = Ask::Permissions::ApprovalQueue.new
     id = queue.submit(tool_call_id: "call-1", tool_name: "bash")
 
     @translator.approval_updated(queue[id].with(status: :applying))

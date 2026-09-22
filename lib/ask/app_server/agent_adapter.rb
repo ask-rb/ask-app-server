@@ -605,7 +605,7 @@ module Ask
     # queue (see Session#build_approval); this subclass only adds
     # observation hooks on top, using its own listeners so the session's
     # on_submit (pending-tool registration) is never clobbered.
-    class EmittingApprovalQueue < Ask::Agent::ApprovalQueue
+    class EmittingApprovalQueue < Ask::Permissions::ApprovalQueue
       # @param on_submit [Proc, nil] called with the new {Action} after
       #   submission (and after the auto-approval drain)
       # @param on_status [Proc, nil] called with an {Action} whose status

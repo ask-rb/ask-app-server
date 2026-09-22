@@ -29,4 +29,5 @@ if monorepo
   gem "ask-instrumentation", path: "../ask-instrumentation"
   gem "ask-sandbox-providers", path: "../ask-sandbox-providers"
   gem "ask-state-providers", path: "../ask-state-providers"
+  gem "ask-permissions", path: "../ask-permissions"
 end
