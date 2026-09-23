@@ -32,7 +32,7 @@ module Ask
       attr_reader :blocked_tools
       attr_reader :permission_timeout
 
-      def initialize(store: nil, host: nil, state_adapter: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
+      def initialize(store: nil, host: nil, state_adapter: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300, project_rules: nil)
         @state_adapter = state_adapter
         @project_grant_state = state_adapter || Ask::State::Memory.new
         @store = store || SessionStore.new(state: state_adapter)
@@ -42,6 +42,7 @@ module Ask
         @permission_mode = permission_mode
         @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
         @permission_timeout = permission_timeout
+        @project_rules_provider = project_rules
         @session_event_observers = []
         @logger = Logger.new($stdout, level: ENV["DEBUG"] ? Logger::DEBUG || Logger::DEBUG : Logger::WARN)
       end
@@ -92,6 +93,7 @@ module Ask
           approval: approval_opts[:mode],
           require_approval: approval_opts[:require_approval],
           project_grants: project_grants_for(workspace_id),
+          project_rules: project_rules_for(canonical_workspace_path(workspace_path), workspace_id),
           plan_mode: plan_mode,
           host: @host
         )
@@ -162,6 +164,7 @@ module Ask
           approval: approval_opts[:mode],
           require_approval: approval_opts[:require_approval],
           project_grants: project_grants,
+          project_rules: project_rules_for(workspace_path, workspace_id),
           plan_mode: plan_mode,
           host: @host,
           created_at: record.created_at
@@ -183,6 +186,24 @@ module Ask
             project_id: workspace_id
           )
         end
+      end
+
+      # Project rule storage and policy selection belong to the host. Supply
+      # either a PermissionRules instance or a callable receiving the
+      # verified workspace path and opaque workspace identity.
+      def project_rules_for(workspace_path, workspace_id)
+        provider = @project_rules_provider
+        return nil unless provider
+
+        rules = if provider.respond_to?(:call)
+          provider.call(workspace_path: workspace_path, workspace_id: workspace_id)
+        else
+          provider
+        end
+        return nil if rules.nil?
+        return rules if rules.respond_to?(:classify)
+
+        raise ArgumentError, 'project_rules provider must return an object responding to :classify'
       end
 
       def workspace_identity(path)

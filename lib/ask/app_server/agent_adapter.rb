@@ -68,7 +68,7 @@ module Ask
       #   Ask::Agent::Session.new (hooks, plan_mode, todos, ...)
       def initialize(model:, tools: nil, system_prompt: nil, agent_dir: nil,
                      approval: :off, require_approval: nil, host: nil,
-                     state_adapter: nil, created_at: nil, project_grants: nil, **session_opts)
+                     state_adapter: nil, created_at: nil, project_grants: nil, project_rules: nil, **session_opts)
         @model = model
         @system_prompt = system_prompt
         @tools = resolve_tools(tools)
@@ -77,6 +77,7 @@ module Ask
         @require_approval = require_approval
         @agent_dir = agent_dir
         @project_grants = project_grants
+        @project_rules = project_rules
         @host = host || build_durable_host(state_adapter)
         @durable_record = false
         # The session's workspace is the tools' home: bash commands
@@ -488,6 +489,7 @@ module Ask
         )
         opts = { queue: queue }
         opts[:project_grants] = @project_grants if @project_grants
+        opts[:project_rules] = @project_rules if @project_rules
         return opts if @approval == :auto
 
         opts.merge(require_approval: @require_approval)

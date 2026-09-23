@@ -39,6 +39,21 @@ class SessionManagerTest < Minitest::Test
     refute_empty metadata[:workspaceId]
   end
 
+  def test_host_supplied_project_rules_are_selected_per_canonical_workspace
+    seen = []
+    provider = lambda do |workspace_path:, workspace_id:|
+      seen << [workspace_path, workspace_id]
+      Ask::Permissions::PermissionRules.new { deny 'read' }
+    end
+    manager = Ask::AppServer::SessionManager.new(project_rules: provider)
+    session_id = manager.create_session(workspace_path: '/tmp/.')
+    policy = manager.get(session_id).session.approval_policy
+
+    assert_equal :deny, policy.rules.classify('read')
+    assert_equal File.realpath('/tmp'), seen.first.first
+    assert_match(/\Aworkspace:/, seen.first.last)
+  end
+
   def test_project_grants_restore_after_manager_restart_with_matching_workspace
     state = Ask::State::Memory.new
     manager, session_id = seed_workspace_session(state)
