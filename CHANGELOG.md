@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-23
+
 ### Added
 
 - Accept a host-owned project-rules object or workspace-aware provider in
   `SessionManager`; selected rules are passed to Ask Agent only for the
   matching verified workspace context. Rule persistence remains host-owned.
-
 ## [0.6.0] - 2026-09-23
 ## [0.5.0] - 2026-09-23
 
