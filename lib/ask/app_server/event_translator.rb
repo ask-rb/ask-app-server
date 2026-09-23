@@ -96,12 +96,12 @@ module Ask
       # An approval action was queued: emit approval.required.
       #
       # @param action [Ask::Permissions::ApprovalQueue::Action]
-      def approval_required(action)
+      def approval_required(action, allowed_scopes: %w[once session])
         payload = { "toolName" => action.tool_name.to_s }
         payload["args"] = action.args if action.args
         payload["message"] = action.message if action.message
         payload["autoApprovable"] = action.auto_approvable unless action.auto_approvable.nil?
-        payload["allowedScopes"] = %w[once session]
+        payload["allowedScopes"] = allowed_scopes
         emit("approval.required", payload.merge("id" => "act_#{action.id}"))
       end
 

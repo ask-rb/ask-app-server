@@ -15,6 +15,14 @@ class SessionStoreTest < Minitest::Test
     assert_equal @adapter, @store.get("sid-1")
   end
 
+  def test_workspace_metadata_survives_in_store
+    @store.add("sid-1", @adapter, workspace_id: "sha256:abc")
+
+    metadata = @store.metadata("sid-1")
+
+    assert_equal "sha256:abc", metadata[:workspaceId]
+  end
+
   def test_add_duplicate_raises
     @store.add("sid-1", @adapter)
     assert_raises(Ask::AppServer::SessionAlreadyExists) do

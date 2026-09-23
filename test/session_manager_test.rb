@@ -25,6 +25,35 @@ class SessionManagerTest < Minitest::Test
     assert_equal session_id, adapter.session_id
   end
 
+  def test_session_scopes_project_grants_to_canonical_workspace
+    state = Ask::State::Memory.new
+    manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+    first_id = manager.create_session(workspace_path: "/tmp")
+    second_id = manager.create_session(workspace_path: "/tmp/.")
+    first = manager.get(first_id).session
+    second = manager.get(second_id).session
+
+    assert_same first.approval_policy.project_grants, second.approval_policy.project_grants
+    assert_instance_of Ask::AppServer::ProjectPermissionGrants, first.approval_policy.project_grants
+    metadata = manager.store.metadata(first_id)
+    refute_empty metadata[:workspaceId]
+  end
+
+  def test_project_grants_restore_after_manager_restart
+    state = Ask::State::Memory.new
+    manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+    session_id = manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
+    adapter = manager.get(session_id)
+    adapter.session.approval_policy.project_grants.grant("bash")
+    manager.host.append(session_id, type: "agent.snapshot", payload: { messages: [], turn_count: 0 })
+
+    restarted = Ask::AppServer::SessionManager.new(state_adapter: state)
+    resumed = restarted.resume_session(session_id)
+
+    assert resumed.session.approval_policy.project_grants.granted?("bash")
+    assert_equal %w[once session project], resumed.allowed_approval_scopes
+  end
+
   def test_create_session_with_defaults
     session_id = @manager.create_session
     assert session_id, "should create with defaults"

@@ -15,10 +15,13 @@
 - `EmittingApprovalQueue` forwards approval scope and rejection feedback to
   the resolved action. App-server `approval.updated` events now include
   non-default `scope` and rejection `feedback` fields when present.
-- App-server approval interactions advertise only the supported `once` and
-  `session` scopes, accept `scope`/rejection `feedback` through JSON-RPC,
-  default omitted scope to `once`, and reject unsupported scopes (including
-  `project`) as invalid requests rather than silently downgrading them.
+- App-server approval interactions advertise supported scopes (`once` and
+  `session`, plus `project` when workspace context is available), accept
+  `scope`/rejection `feedback` through JSON-RPC,
+  default omitted scope to `once`, and reject unsupported scopes as invalid
+  requests rather than silently downgrading them. With workspace context,
+  sessions also offer `project` scope, persisted in the configured state
+  provider under a hashed canonical workspace identity.
 
 ## [0.4.30] - 2026-09-23
 

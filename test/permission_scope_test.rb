@@ -21,7 +21,7 @@ class PermissionScopeTest < Minitest::Test
     $stderr = @original_stderr
   end
 
-  # 1. Event offer: approval.required advertises allowedScopes [once, session]
+  # 1. Event offer: a workspace approval advertises all supported scopes.
   def test_approval_required_offers_allowed_scopes
     session_id = @manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
     adapter = @manager.get(session_id)
@@ -32,7 +32,7 @@ class PermissionScopeTest < Minitest::Test
 
     required = adapter.translator.pending_events.find { |e| e.type == "approval.required" }
     assert required, "approval.required should be emitted"
-    assert_equal %w[once session], required.payload["allowedScopes"]
+    assert_equal %w[once session project], required.payload["allowedScopes"]
   end
 
   # Pending interaction payloads also advertise allowedScopes
@@ -43,7 +43,7 @@ class PermissionScopeTest < Minitest::Test
 
     interactions = @manager.pending_interactions(session_id)
     assert_equal 1, interactions.size
-    assert_equal %w[once session], interactions.first.payload["allowedScopes"]
+    assert_equal %w[once session project], interactions.first.payload["allowedScopes"]
   end
 
   # 2. Session scope round-trip through request handling
@@ -114,9 +114,25 @@ class PermissionScopeTest < Minitest::Test
     assert_equal "Use a read-only alternative", updated.payload["feedback"]
   end
 
+  def test_project_scope_round_trip_grants_workspace_tool
+    adapter, _queue, session_id = adapter_with_queued_action
+
+    dispatch("interaction/approve",
+             { "sessionId" => session_id, "interactionId" => "act_1", "scope" => "project" }, id: 2)
+    response = read_response
+
+    assert response.dig("result", "approved"), "project approval should succeed: #{response.inspect}"
+    assert adapter.session.approval_policy.project_grants.granted?("bash")
+    refute adapter.session.session_grants.granted?("bash")
+  end
+
   # 5. Project scope is rejected explicitly, never silently downgraded
   def test_project_scope_rejected_explicitly
-    adapter, queue, session_id = adapter_with_queued_action
+    session_id = @manager.create_session(model: "gpt-4o")
+    adapter = @manager.get(session_id)
+    queue = adapter.session.approval_queue
+    adapter.session.define_singleton_method(:run_follow_up) { true }
+    queue.submit(tool_call_id: "call-1", tool_name: "bash")
 
     dispatch("interaction/approve",
              { "sessionId" => session_id, "interactionId" => "act_1", "scope" => "project" }, id: 2)
@@ -143,8 +159,8 @@ class PermissionScopeTest < Minitest::Test
 
   private
 
-  def adapter_with_queued_action
-    session_id = @manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
+  def adapter_with_queued_action(workspace_path: "/tmp")
+    session_id = @manager.create_session(workspace_path: workspace_path, model: "gpt-4o")
     adapter = @manager.get(session_id)
     queue = adapter.session.approval_queue
     adapter.session.instance_variable_get(:@pending_tools)["call-1"] = {

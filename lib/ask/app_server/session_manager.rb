@@ -33,8 +33,12 @@ module Ask
       attr_reader :permission_timeout
 
       def initialize(store: nil, host: nil, state_adapter: nil, permission_mode: :on_request, blocked_tools: nil, permission_timeout: 300)
+        @state_adapter = state_adapter
+        @project_grant_state = state_adapter || Ask::State::Memory.new
         @store = store || SessionStore.new(state: state_adapter)
         @host = host || build_host(state_adapter)
+        @project_grant_stores = {}
+        @project_grant_mutex = Mutex.new
         @permission_mode = permission_mode
         @blocked_tools = (blocked_tools || DEFAULT_REQUIRE_APPROVAL).map(&:to_s)
         @permission_timeout = permission_timeout
@@ -69,6 +73,7 @@ module Ask
       #   falls back to the manager's permission_mode
       def create_session(workspace_path: nil, mode: nil, model: nil, tools: nil, system_prompt: nil)
         approval_opts, plan_mode = resolve_approval(mode)
+        workspace_id = workspace_identity(workspace_path)
 
         # A provider-qualified model must stay resolvable: the agent's
         # model catalog looks up bare ids, so the prefixed model is
@@ -86,12 +91,13 @@ module Ask
           agent_dir: workspace_path,
           approval: approval_opts[:mode],
           require_approval: approval_opts[:require_approval],
+          project_grants: project_grants_for(workspace_id),
           plan_mode: plan_mode,
           host: @host
         )
 
         session_id = adapter.start_session
-        @store.add(session_id, adapter)
+        @store.add(session_id, adapter, workspace_id: workspace_id)
 
         # Attach observers after registration so they see a settled store
         # (e.g. the pane reporter's session-count metadata), then replay
@@ -129,23 +135,53 @@ module Ask
           raise Ask::AppServer::SessionNotFound, "Session #{session_id} is not active"
         end
 
+        stored_metadata = @store.metadata(session_id) || {}
+        workspace_id = stored_metadata[:workspaceId] || stored_metadata["workspaceId"]
+        workspace_path = nil
         approval_opts, plan_mode = resolve_approval(nil)
         adapter = AgentAdapter.new(
           model: resolve_agent_model(nil),
           tools: DEFAULT_TOOLS,
-          system_prompt: build_default_system_prompt(nil),
+          system_prompt: build_default_system_prompt(workspace_path),
+          agent_dir: workspace_path,
           approval: approval_opts[:mode],
           require_approval: approval_opts[:require_approval],
+          project_grants: project_grants_for(workspace_id),
           plan_mode: plan_mode,
           host: @host,
           created_at: record.created_at
         )
         adapter.resume_from_host(session_id)
-        @store.add(session_id, adapter)
+        @store.add(session_id, adapter, workspace_id: workspace_id)
 
         adapter.on_event { |event| notify_session_event(adapter.session_id, event) }
         @logger.info("Resumed session #{session_id} from the durable host")
         adapter
+      end
+
+      def project_grants_for(workspace_id)
+        return nil unless workspace_id
+
+        @project_grant_mutex.synchronize do
+          @project_grant_stores[workspace_id] ||= ProjectPermissionGrants.new(
+            state: @project_grant_state,
+            project_id: workspace_id
+          )
+        end
+      end
+
+      def workspace_identity(path)
+        canonical = canonical_workspace_path(path)
+        canonical && "workspace:#{Digest::SHA256.hexdigest(canonical)}"
+      end
+
+      def canonical_workspace_path(path)
+        return nil if path.nil? || path.to_s.strip.empty?
+
+        expanded = File.expand_path(path.to_s)
+        File.realpath(expanded)
+      rescue SystemCallError
+        expanded
       end
 
       # Remove a session.

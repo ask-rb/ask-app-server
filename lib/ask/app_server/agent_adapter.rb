@@ -28,11 +28,9 @@ module Ask
       # keeps Host seq and wire seq contiguous from 1.
       HOST_OWNED_EVENT_TYPES = %w[session.created session.ended].freeze
 
-      # Approval scopes this host honors. The queue itself knows
-      # :once/:session/:project, but the app-server only offers
-      # once/session — :project is rejected explicitly, never silently
-      # downgraded.
-      ALLOWED_APPROVAL_SCOPES = %i[once session].freeze
+      # Approval scopes available without workspace context. A project scope
+      # is added only when the host supplies a workspace grant store.
+      BASE_APPROVAL_SCOPES = %i[once session].freeze
 
       # The underlying ask-agent session.
       attr_reader :session
@@ -70,7 +68,7 @@ module Ask
       #   Ask::Agent::Session.new (hooks, plan_mode, todos, ...)
       def initialize(model:, tools: nil, system_prompt: nil, agent_dir: nil,
                      approval: :off, require_approval: nil, host: nil,
-                     state_adapter: nil, created_at: nil, **session_opts)
+                     state_adapter: nil, created_at: nil, project_grants: nil, **session_opts)
         @model = model
         @system_prompt = system_prompt
         @tools = resolve_tools(tools)
@@ -78,6 +76,7 @@ module Ask
         @approval = approval
         @require_approval = require_approval
         @agent_dir = agent_dir
+        @project_grants = project_grants
         @host = host || build_durable_host(state_adapter)
         @durable_record = false
         # The session's workspace is the tools' home: bash commands
@@ -197,6 +196,12 @@ module Ask
         !@running
       end
 
+      def allowed_approval_scopes
+        scopes = BASE_APPROVAL_SCOPES.dup
+        scopes << :project if @project_grants
+        scopes.map(&:to_s)
+      end
+
       # ── Interactions (approvals) ───────────────────────────────────────
 
       # Pending approval interactions, as canonical Interaction objects.
@@ -209,7 +214,7 @@ module Ask
           payload["args"] = action.args if action.args
           payload["message"] = action.message if action.message
           payload["autoApprovable"] = action.auto_approvable unless action.auto_approvable.nil?
-          payload["allowedScopes"] = %w[once session]
+          payload["allowedScopes"] = allowed_approval_scopes
           Ask::SessionProtocol::Interactions.interaction(
             id: "act_#{action.id}", kind: "approval", status: "pending", payload: payload
           )
@@ -217,8 +222,8 @@ module Ask
       end
 
       # Approve a pending approval interaction by canonical id ("act_N").
-      # @param scope [Symbol, String] :once (default) or :session.
-      #   :project is rejected explicitly via InvalidRequest.
+      # @param scope [Symbol, String] :once (default), :session, or :project
+      #   when a workspace-scoped grant store is available.
       # @return [Boolean] whether an action was approved
       def approve_interaction(interaction_id, scope: :once)
         normalized = normalize_approval_scope!(scope)
@@ -478,12 +483,14 @@ module Ask
         return nil if @approval == :off
 
         queue = EmittingApprovalQueue.new(
-          on_submit: ->(action) { @translator.approval_required(action) },
+          on_submit: ->(action) { @translator.approval_required(action, allowed_scopes: allowed_approval_scopes) },
           on_status: ->(action) { @translator.approval_updated(action) }
         )
-        return { queue: queue } if @approval == :auto
+        opts = { queue: queue }
+        opts[:project_grants] = @project_grants if @project_grants
+        return opts if @approval == :auto
 
-        { queue: queue, require_approval: @require_approval }
+        opts.merge(require_approval: @require_approval)
       end
 
       def apply_interaction(interaction_id)
@@ -498,17 +505,17 @@ module Ask
 
       # Normalize and validate an approval scope. Omitted scope defaults
       # to :once (backward compatible). Anything outside
-      # ALLOWED_APPROVAL_SCOPES — notably :project — raises InvalidRequest
-      # explicitly instead of silently downgrading.
+      # Project scope is available only when the host supplied a project
+      # grants collaborator; unsupported scope raises InvalidRequest.
       def normalize_approval_scope!(scope)
         normalized = if scope.nil?
           :once
         elsif scope.is_a?(String) || scope.is_a?(Symbol)
           scope.to_sym
         end
-        unless ALLOWED_APPROVAL_SCOPES.include?(normalized)
+        unless allowed_approval_scopes.include?(normalized.to_s)
           raise InvalidRequest,
-                "Unsupported approval scope '#{scope}' (supported: #{ALLOWED_APPROVAL_SCOPES.join(', ')})"
+                "Unsupported approval scope '#{scope}' (supported: #{allowed_approval_scopes.join(', ')})"
         end
         normalized
       end

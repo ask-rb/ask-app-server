@@ -30,13 +30,14 @@ module Ask
       end
 
       # Register a new session.
-      def add(session_id, adapter)
+      def add(session_id, adapter, workspace_id: nil)
         model = adapter.respond_to?(:instance_variable_get) ? adapter.instance_variable_get(:@model) : nil
         metadata = {
           sessionId: session_id,
           model: model,
           createdAt: adapter.respond_to?(:created_at) ? adapter.created_at.iso8601 : Time.now.iso8601
         }
+        metadata[:workspaceId] = workspace_id if workspace_id
 
         @mutex.synchronize do
           existing = @state.get("#{SESSION_PREFIX}#{session_id}")
@@ -48,6 +49,12 @@ module Ask
           @state.list_append(SESSION_LIST_KEY, session_id, max_length: 200) unless existing
           @adapters[session_id] = adapter
         end
+      end
+
+      # Session metadata persisted independently of the live adapter.
+      def metadata(session_id)
+        value = @state.get("#{SESSION_PREFIX}#{session_id}")
+        value&.transform_keys(&:to_sym)
       end
 
       # Remove a session.
