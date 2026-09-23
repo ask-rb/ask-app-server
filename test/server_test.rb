@@ -273,7 +273,7 @@ class ServerTest < Minitest::Test
 
   def test_interaction_approve
     session_id = create_test_session
-    @session_manager.get(session_id).stubs(:approve_interaction).with("act_1").returns(true)
+    @session_manager.get(session_id).stubs(:approve_interaction).with("act_1", scope: "once").returns(true)
     clear_output!
 
     handle("interaction/approve", { sessionId: session_id, interactionId: "act_1" }, id: 2)
@@ -297,7 +297,7 @@ class ServerTest < Minitest::Test
 
   def test_interaction_reject
     session_id = create_test_session
-    @session_manager.get(session_id).stubs(:reject_interaction).with("act_1").returns(true)
+    @session_manager.get(session_id).stubs(:reject_interaction).with("act_1", feedback: nil).returns(true)
     clear_output!
 
     handle("interaction/reject", { sessionId: session_id, interactionId: "act_1" }, id: 2)

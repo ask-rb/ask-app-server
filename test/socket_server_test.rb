@@ -192,7 +192,7 @@ class SocketServerTest < Minitest::Test
 
     # Resolving a real action would execute the tool and start a follow-up
     # LLM turn; stub the adapter to assert the protocol routing only.
-    @session_manager.get(session_id).stubs(:approve_interaction).with("act_1").returns(true)
+    @session_manager.get(session_id).stubs(:approve_interaction).with("act_1", scope: "once").returns(true)
     approved = client.request("interaction/approve", { sessionId: session_id, interactionId: "act_1" })
     assert approved.dig("result", "approved")
   ensure
