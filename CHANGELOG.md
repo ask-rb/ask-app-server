@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.30] - 2026-09-23
+
+### Changed
+
+- Migrated `ApprovalQueue` to `ask-permissions`.
+
 ### Fixed
 
 - **Durable session listings survive restart.** When `state_adapter:` is

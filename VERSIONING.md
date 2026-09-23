@@ -32,6 +32,22 @@ Patch numbers advance by exactly one per release: `0.4.22` → `0.4.23` →
 even when several fixes ship together — they ship as a single release with a
 single patch number. The same one-step rule applies to minor and major.
 
+### Patch digit range (0–9 only)
+
+The patch digit ranges only from `0` through `9`. When a release would push
+the patch past `9`, the next release rolls the minor up by one and resets
+the patch to `0`: `0.4.9` → `0.5.0`, `0.5.9` → `0.6.0`. Two-digit patches
+are never written going forward.
+
+### One-time bridge: 0.4.30 → next release is 0.5.0
+
+`0.4.30` is **already published**. Do not rewrite it, re-cut it, or
+"correct" the changelog heading — the published version stands as-is and is
+the sole exception to the 0–9 patch rule. Because `0.4.30` occupies the end
+of the `0.4.x` line, the **next release must be `0.5.0`** (patch resets to
+`0`, minor rolls up one). This bridge applies once; from `0.5.0` onward the
+normal `0`–`9` patch rule applies without exception.
+
 ## Changelog workflow (Unreleased)
 
 - `CHANGELOG.md` keeps an `## [Unreleased]` section at the top.
