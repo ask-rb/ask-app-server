@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-23
+
 ### Added
 
 - `session/resume` accepts optional workspace context — the same nested
@@ -56,7 +58,6 @@
   be acquired. Adapters without lock support keep working through the
   documented single-process fallback (local mutex only); reads stay
   lock-free and available while a mutation waits.
-
 ## [0.4.30] - 2026-09-23
 
 ### Changed
