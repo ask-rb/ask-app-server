@@ -236,6 +236,24 @@ class EventTranslatorTest < Minitest::Test
     assert_empty @translator.pending_events
   end
 
+  def test_approval_updated_preserves_scope_and_rejection_feedback
+    queue = Ask::Permissions::ApprovalQueue.new
+    approved_id = queue.submit(tool_call_id: "call-1", tool_name: "bash")
+    queue.approve(approved_id, scope: :session)
+
+    @translator.approval_updated(queue[approved_id])
+    approved = @translator.pending_events.last
+    assert_equal "session", approved.payload["scope"]
+
+    rejected_id = queue.submit(tool_call_id: "call-2", tool_name: "write")
+    queue.reject(rejected_id, feedback: "Use a read-only alternative")
+
+    @translator.approval_updated(queue[rejected_id])
+    rejected = @translator.pending_events.last
+    assert_equal "rejected", rejected.payload["status"]
+    assert_equal "Use a read-only alternative", rejected.payload["feedback"]
+  end
+
   # ── Session lifecycle ──────────────────────────────────────────────────
 
   def test_session_created_and_ended

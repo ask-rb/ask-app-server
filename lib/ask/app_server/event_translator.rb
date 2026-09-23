@@ -111,7 +111,12 @@ module Ask
         status = action.status.to_s
         return unless %w[approved rejected].include?(status)
 
-        emit("approval.updated", { "id" => "act_#{action.id}", "status" => status })
+        payload = { "id" => "act_#{action.id}", "status" => status }
+        if status == "approved" && action.resolution_scope && action.resolution_scope != :once
+          payload["scope"] = action.resolution_scope.to_s
+        end
+        payload["feedback"] = action.feedback if status == "rejected" && action.feedback
+        emit("approval.updated", payload)
       end
 
       # A session was created: emit session.created.

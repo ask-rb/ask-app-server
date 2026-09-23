@@ -12,6 +12,9 @@
   protocol API (`before_tool_call`, `handle_response`, `cancel_all!`,
   `pending_count`/`pending?`, `on_request`, synchronous condition wait)
   is unchanged.
+- `EmittingApprovalQueue` forwards approval scope and rejection feedback to
+  the resolved action. App-server `approval.updated` events now include
+  non-default `scope` and rejection `feedback` fields when present.
 
 ## [0.4.30] - 2026-09-23
 

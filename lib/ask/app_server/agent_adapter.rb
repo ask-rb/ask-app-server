@@ -624,15 +624,15 @@ module Ask
 
       private
 
-      def apply(action)
-        result = super
-        @on_status&.call(action.with(status: :approved))
+      def apply(action, scope: :once)
+        result = super(action, scope: scope)
+        @on_status&.call(result)
         result
       end
 
-      def reject_action(action)
-        result = super
-        @on_status&.call(action.with(status: :rejected))
+      def reject_action(action, feedback: nil)
+        result = super(action, feedback: feedback)
+        @on_status&.call(result)
         result
       end
     end
