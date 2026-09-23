@@ -28,6 +28,12 @@ module Ask
       # keeps Host seq and wire seq contiguous from 1.
       HOST_OWNED_EVENT_TYPES = %w[session.created session.ended].freeze
 
+      # Approval scopes this host honors. The queue itself knows
+      # :once/:session/:project, but the app-server only offers
+      # once/session — :project is rejected explicitly, never silently
+      # downgraded.
+      ALLOWED_APPROVAL_SCOPES = %i[once session].freeze
+
       # The underlying ask-agent session.
       attr_reader :session
 
@@ -203,6 +209,7 @@ module Ask
           payload["args"] = action.args if action.args
           payload["message"] = action.message if action.message
           payload["autoApprovable"] = action.auto_approvable unless action.auto_approvable.nil?
+          payload["allowedScopes"] = %w[once session]
           Ask::SessionProtocol::Interactions.interaction(
             id: "act_#{action.id}", kind: "approval", status: "pending", payload: payload
           )
@@ -210,33 +217,41 @@ module Ask
       end
 
       # Approve a pending approval interaction by canonical id ("act_N").
+      # @param scope [Symbol, String] :once (default) or :session.
+      #   :project is rejected explicitly via InvalidRequest.
       # @return [Boolean] whether an action was approved
-      def approve_interaction(interaction_id)
-        apply_interaction(interaction_id) { |queue, id| queue.approve(id) }
+      def approve_interaction(interaction_id, scope: :once)
+        normalized = normalize_approval_scope!(scope)
+        apply_interaction(interaction_id) { |queue, id| queue.approve(id, scope: normalized) }
       end
 
       # Reject a pending approval interaction by canonical id ("act_N").
+      # @param feedback [String, nil] client-supplied denial reason,
+      #   retained on the action and surfaced in approval.updated.
       # @return [Boolean] whether an action was rejected
-      def reject_interaction(interaction_id)
-        apply_interaction(interaction_id) { |queue, id| queue.reject(id) }
+      def reject_interaction(interaction_id, feedback: nil)
+        apply_interaction(interaction_id) { |queue, id| queue.reject(id, feedback: feedback) }
       end
 
       # Approve every pending approval interaction.
+      # @param scope [Symbol, String] :once (default) or :session
       # @return [Integer] number approved
-      def approve_all_interactions
+      def approve_all_interactions(scope: :once)
+        normalized = normalize_approval_scope!(scope)
         queue = @session&.approval_queue
         return 0 unless queue
 
-        queue.approve_all.size
+        queue.approve_all(scope: normalized).size
       end
 
       # Reject every pending approval interaction.
+      # @param feedback [String, nil] denial reason applied to each
       # @return [Integer] number rejected
-      def reject_all_interactions
+      def reject_all_interactions(feedback: nil)
         queue = @session&.approval_queue
         return 0 unless queue
 
-        queue.reject_all.size
+        queue.reject_all(feedback: feedback).size
       end
 
       # ── Plan mode ───────────────────────────────────────────────────────
@@ -479,6 +494,23 @@ module Ask
         return false unless queue
 
         yield(queue, id.to_i).any?
+      end
+
+      # Normalize and validate an approval scope. Omitted scope defaults
+      # to :once (backward compatible). Anything outside
+      # ALLOWED_APPROVAL_SCOPES — notably :project — raises InvalidRequest
+      # explicitly instead of silently downgrading.
+      def normalize_approval_scope!(scope)
+        normalized = if scope.nil?
+          :once
+        elsif scope.is_a?(String) || scope.is_a?(Symbol)
+          scope.to_sym
+        end
+        unless ALLOWED_APPROVAL_SCOPES.include?(normalized)
+          raise InvalidRequest,
+                "Unsupported approval scope '#{scope}' (supported: #{ALLOWED_APPROVAL_SCOPES.join(', ')})"
+        end
+        normalized
       end
 
       def start_run(content)

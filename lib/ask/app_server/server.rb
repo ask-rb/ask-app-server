@@ -488,9 +488,10 @@ module Ask
         handler("interaction/approve") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
           interaction_id = params["interactionId"] || params[:interactionId]
+          scope = params["scope"] || params[:scope] || "once"
           raise InvalidRequest, "sessionId and interactionId are required" unless session_id && interaction_id
 
-          approved = @session_manager.approve_interaction(session_id, interaction_id)
+          approved = @session_manager.approve_interaction(session_id, interaction_id, scope: scope)
           raise Ask::AppServer::InteractionNotFound, "Interaction #{interaction_id} not found" unless approved
 
           { approved: true, interactionId: interaction_id }
@@ -500,9 +501,10 @@ module Ask
         handler("interaction/reject") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
           interaction_id = params["interactionId"] || params[:interactionId]
+          feedback = params["feedback"] || params[:feedback]
           raise InvalidRequest, "sessionId and interactionId are required" unless session_id && interaction_id
 
-          rejected = @session_manager.reject_interaction(session_id, interaction_id)
+          rejected = @session_manager.reject_interaction(session_id, interaction_id, feedback: feedback)
           raise Ask::AppServer::InteractionNotFound, "Interaction #{interaction_id} not found" unless rejected
 
           { rejected: true, interactionId: interaction_id }
@@ -511,17 +513,19 @@ module Ask
         # Interaction: approve all pending
         handler("interaction/approve-all") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
+          scope = params["scope"] || params[:scope] || "once"
           raise InvalidRequest, "sessionId is required" unless session_id
 
-          { approved: @session_manager.approve_all_interactions(session_id) }
+          { approved: @session_manager.approve_all_interactions(session_id, scope: scope) }
         end
 
         # Interaction: reject all pending
         handler("interaction/reject-all") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
+          feedback = params["feedback"] || params[:feedback]
           raise InvalidRequest, "sessionId is required" unless session_id
 
-          { rejected: @session_manager.reject_all_interactions(session_id) }
+          { rejected: @session_manager.reject_all_interactions(session_id, feedback: feedback) }
         end
 
         # Interaction: respond to a user_input interaction (elicitation).

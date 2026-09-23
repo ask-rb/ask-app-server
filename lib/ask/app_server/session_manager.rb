@@ -202,39 +202,43 @@ module Ask
       end
 
       # Approve a pending approval interaction by canonical id.
+      # @param scope [Symbol, String] :once (default) or :session
       # @return [Boolean]
-      def approve_interaction(session_id, interaction_id)
+      def approve_interaction(session_id, interaction_id, scope: :once)
         adapter = @store.get(session_id)
         raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
-        adapter.approve_interaction(interaction_id)
+        adapter.approve_interaction(interaction_id, scope: scope)
       end
 
       # Reject a pending approval interaction by canonical id.
+      # @param feedback [String, nil] denial reason forwarded to the queue
       # @return [Boolean]
-      def reject_interaction(session_id, interaction_id)
+      def reject_interaction(session_id, interaction_id, feedback: nil)
         adapter = @store.get(session_id)
         raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
-        adapter.reject_interaction(interaction_id)
+        adapter.reject_interaction(interaction_id, feedback: feedback)
       end
 
       # Approve every pending approval interaction.
+      # @param scope [Symbol, String] :once (default) or :session
       # @return [Integer] number approved
-      def approve_all_interactions(session_id)
+      def approve_all_interactions(session_id, scope: :once)
         adapter = @store.get(session_id)
         raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
-        adapter.approve_all_interactions
+        adapter.approve_all_interactions(scope: scope)
       end
 
       # Reject every pending approval interaction.
+      # @param feedback [String, nil] denial reason forwarded to the queue
       # @return [Integer] number rejected
-      def reject_all_interactions(session_id)
+      def reject_all_interactions(session_id, feedback: nil)
         adapter = @store.get(session_id)
         raise Ask::AppServer::SessionNotFound, "Session #{session_id} not found" unless adapter
 
-        adapter.reject_all_interactions
+        adapter.reject_all_interactions(feedback: feedback)
       end
 
       # ── Plan mode ───────────────────────────────────────────────────────

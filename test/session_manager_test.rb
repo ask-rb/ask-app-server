@@ -178,10 +178,10 @@ class SessionManagerTest < Minitest::Test
       id: "act_1", kind: "approval", payload: { "toolName" => "bash" }
     )
     adapter.stubs(:pending_interactions).returns([interaction])
-    adapter.stubs(:approve_interaction).with("act_1").returns(true)
-    adapter.stubs(:reject_interaction).with("act_2").returns(true)
-    adapter.stubs(:approve_all_interactions).returns(3)
-    adapter.stubs(:reject_all_interactions).returns(1)
+    adapter.stubs(:approve_interaction).with("act_1", scope: :once).returns(true)
+    adapter.stubs(:reject_interaction).with("act_2", feedback: nil).returns(true)
+    adapter.stubs(:approve_all_interactions).with(scope: :once).returns(3)
+    adapter.stubs(:reject_all_interactions).with(feedback: nil).returns(1)
     adapter.stubs(:plan_approve).returns(true)
     adapter.stubs(:plan_reject).returns(true)
 
