@@ -260,6 +260,15 @@ module Ask
         10_000 + @outgoing_id
       end
 
+      # Optional workspace context on session/resume: the nested shape
+      # session/create accepts, plus a top-level workspacePath. Absent
+      # (nil) means no proof — the manager fails closed.
+      def resume_workspace_path(params)
+        workspace = params["workspace"] || params[:workspace]
+        path = workspace.is_a?(Hash) ? (workspace["workspacePath"] || workspace[:workspacePath]) : nil
+        path || params["workspacePath"] || params[:workspacePath]
+      end
+
       def reader_loop(connection)
         while @running
           line = connection.read_line
@@ -360,11 +369,22 @@ module Ask
         # otherwise a durable restart resume: rebuild a fresh agent
         # session from the Host (restored from its snapshot when one
         # exists) and attach it to the live registry.
+        #
+        # Optional workspace context: the same nested shape
+        # session/create accepts (`workspace.workspacePath`, or a
+        # top-level `workspacePath`). It is passed through for
+        # verification only — resume fails closed (no project approval
+        # scope, tools unpinned from any workspace) when it is absent
+        # or does not canonicalize to the session's stored (hashed)
+        # workspace identity. See SessionManager#resume_session.
         handler("session/resume") do |params, _id|
           session_id = params["sessionId"] || params[:sessionId]
           raise InvalidRequest, "sessionId is required" unless session_id
 
-          adapter = @session_manager.resume_session(session_id)
+          adapter = @session_manager.resume_session(
+            session_id,
+            workspace_path: resume_workspace_path(params)
+          )
 
           {
             sessionId: session_id,

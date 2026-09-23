@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `session/resume` accepts optional workspace context — the same nested
+  shape `session/create` takes (`workspace.workspacePath`, or a top-level
+  `workspacePath`). It is passed to the manager for verification only; the
+  resume result shape is unchanged.
+
 ### Changed
 
 - `Ask::AppServer::PermissionHandler` now delegates decisions to the shared
@@ -22,6 +29,33 @@
   requests rather than silently downgrading them. With workspace context,
   sessions also offer `project` scope, persisted in the configured state
   provider under a hashed canonical workspace identity.
+
+### Fixed
+
+- **`session/resume` fails closed on project scope.** A durable resume used
+  to reattach the stored project grants while rebuilding the agent with no
+  workspace (`agent_dir`/tools `default_workdir` nil) — restoring an old
+  project's approvals for tools running from the host's cwd. Grants are now
+  attached (and `project` advertised as an approval scope, and tools pinned
+  to the workspace) only when the caller supplies a workspace path that
+  canonicalizes to the session's stored identity; absent or mismatched
+  context resumes with `once`/`session` scopes only and no pinned workdir.
+  The stored `workspaceId` remains a SHA-256 of the canonical path — raw
+  absolute paths are never written to persisted metadata — and is preserved
+  across resumes so a later verified resume can still restore project scope.
+  In-process resume (the live adapter) is unchanged.
+- **Project permission grants no longer lose updates across processes.**
+  `grant`/`revoke` read-modify-write cycles were serialized only by a
+  local `Mutex`, so two app-server processes sharing one SQLite/Postgres/
+  Redis/MySQL backend could interleave and silently drop each other's
+  writes (e.g. a revoke that never persists). Mutations now hold the
+  `Ask::State::Adapter` contract's distributed lock
+  (`acquire_lock`/`release_lock` — token-safe on every shipped backend)
+  across the whole read-modify-write, retrying briefly under contention and
+  failing closed (raising) instead of writing outside the lock if it cannot
+  be acquired. Adapters without lock support keep working through the
+  documented single-process fallback (local mutex only); reads stay
+  lock-free and available while a mutation waits.
 
 ## [0.4.30] - 2026-09-23
 

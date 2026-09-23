@@ -78,7 +78,7 @@ From another process, send JSON-RPC requests:
 | `initialize` | Handshake; negotiates `protocolVersion` and capabilities |
 | `session/create` | Create a new agent session |
 | `session/list` | List active sessions |
-| `session/resume` | Resume an existing session |
+| `session/resume` | Resume an existing session (optional workspace context, see below) |
 | `session/subscribe` | Subscribe to the event stream (with replay snapshot) |
 | `session/send` | Prompt an idle session or inject mid-run (`steered`/`queued`/`stale`) |
 | `session/events` | Poll for events after a sequence number |
@@ -110,6 +110,14 @@ Every event is a canonical `{type, seq, payload}` envelope, delivered as a
 
 The full vocabulary, payload shapes, method specs, and versioning live in
 the ask-session-protocol gem (JSON Schema artifact included).
+
+`session/resume` takes an optional workspace context — the same nested
+`workspace.workspacePath` shape as `session/create`. It is verified against
+the session's stored identity (a SHA-256 of the canonical path; raw paths
+are never persisted): project-scoped approvals come back and tools are
+pinned to the workspace only when the supplied path canonicalizes to that
+identity. Absent or mismatched context fails closed — the session resumes
+with `once`/`session` approval scopes only and no pinned workdir.
 
 The event log itself is event-sourced in [ask-session](https://github.com/ask-rb/ask-session)'s
 `Host`: replay (`session/events`, subscribe snapshots, cursor push) reads

@@ -84,6 +84,63 @@ class ServerTest < Minitest::Test
     assert_equal(-32004, response.dig("error", "code"))
   end
 
+  # JSON-RPC resume accepts the same nested workspace context as
+  # session/create and the manager verifies it against the stored
+  # identity: matching context restores project scope, anything else
+  # fails closed to once/session.
+  def test_session_resume_with_matching_workspace_context_restores_project_scope
+    state = Ask::State::Memory.new
+    session_id = seed_durable_workspace_session(state)
+
+    manager, server, connection, output = restart_over(state)
+    server.dispatch(
+      { "id" => 1, "method" => "session/resume",
+        "params" => { "sessionId" => session_id, "workspace" => { "workspacePath" => "/tmp/." } } },
+      connection
+    )
+    response = JSON.parse(output.string.lines.first)
+
+    assert_equal session_id, response.dig("result", "sessionId")
+    adapter = manager.get(session_id)
+    assert_equal %w[once session project], adapter.allowed_approval_scopes
+    assert adapter.session.approval_policy.project_grants.granted?("bash")
+  end
+
+  def test_session_resume_without_workspace_context_fails_closed
+    state = Ask::State::Memory.new
+    session_id = seed_durable_workspace_session(state)
+
+    manager, server, connection, output = restart_over(state)
+    server.dispatch(
+      { "id" => 1, "method" => "session/resume", "params" => { "sessionId" => session_id } },
+      connection
+    )
+    response = JSON.parse(output.string.lines.first)
+
+    assert_equal session_id, response.dig("result", "sessionId")
+    adapter = manager.get(session_id)
+    assert_nil adapter.session.approval_policy.project_grants
+    assert_equal %w[once session], adapter.allowed_approval_scopes
+  end
+
+  def test_session_resume_with_mismatched_workspace_context_fails_closed
+    state = Ask::State::Memory.new
+    session_id = seed_durable_workspace_session(state)
+
+    manager, server, connection, output = restart_over(state)
+    server.dispatch(
+      { "id" => 1, "method" => "session/resume",
+        "params" => { "sessionId" => session_id, "workspace" => { "workspacePath" => "/var/ask-app-server-elsewhere" } } },
+      connection
+    )
+    response = JSON.parse(output.string.lines.first)
+
+    assert_equal session_id, response.dig("result", "sessionId")
+    adapter = manager.get(session_id)
+    assert_nil adapter.session.approval_policy.project_grants
+    assert_equal %w[once session], adapter.allowed_approval_scopes
+  end
+
   def test_session_subscribe
     session_id = create_test_session
     clear_output!
@@ -583,6 +640,27 @@ class ServerTest < Minitest::Test
 
   def create_test_session
     @session_manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
+  end
+
+  # Seed a durable workspace session (granted project tool + snapshot)
+  # over the given state so a restarted manager can resume it.
+  def seed_durable_workspace_session(state, workspace_path: "/tmp")
+    manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+    session_id = manager.create_session(workspace_path: workspace_path, model: "gpt-4o")
+    manager.get(session_id).session.approval_policy.project_grants.grant("bash")
+    manager.host.append(session_id, type: "agent.snapshot", payload: { messages: [], turn_count: 0 })
+    session_id
+  end
+
+  # A fresh manager/server over the same state (simulated restart) with
+  # its own captured output. Returns [manager, server, connection, output].
+  def restart_over(state)
+    manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+    server = Ask::AppServer::Server.new(session_manager: manager)
+    output = StringIO.new
+    output.sync = true
+    connection = server.add_connection(Ask::AppServer::Connection.new(StringIO.new(""), output))
+    [manager, server, connection, output]
   end
 
   # Subscribe a watcher, drive one terminal run failure through the

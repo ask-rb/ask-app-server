@@ -198,6 +198,51 @@ class SessionRestartResumeTest < Minitest::Test
     state2.close
   end
 
+  # Workspace context across a real restart: project grants are stored
+  # under the hashed workspace identity and only come back when the
+  # resume caller proves the context with a path that canonicalizes to
+  # that identity. Absent/mismatched context resumes without project
+  # scope and without pinning tools to any workspace.
+  def test_manager_restart_resume_workspace_context_fails_closed_without_proof
+    manager1, state1 = build_manager
+    sid = manager1.create_session(model: "gpt-4o", workspace_path: @dir)
+    manager1.get(sid).session.approval_policy.project_grants.grant("bash")
+    manager1.host.append(sid, type: "agent.snapshot", payload: { messages: [], turn_count: 0 })
+    state1.close
+
+    # Absent context: fail closed — stored grants stay unattached.
+    manager2, state2 = build_manager
+    unverified = manager2.resume_session(sid)
+    assert_nil unverified.session.approval_policy.project_grants
+    assert_equal %w[once session], unverified.allowed_approval_scopes
+    assert_nil bash_workdir(unverified)
+
+    # Mismatched context: another directory never unlocks this
+    # project's grants either.
+    manager3, state3 = build_manager
+    mismatched = manager3.resume_session(sid, workspace_path: File.join(@dir, "other-project"))
+    assert_nil mismatched.session.approval_policy.project_grants
+    assert_equal %w[once session], mismatched.allowed_approval_scopes
+    assert_nil bash_workdir(mismatched)
+
+    # Matching context (different spelling of the same directory):
+    # grants restore and tools pin to the canonical workspace.
+    manager4, state4 = build_manager
+    verified = manager4.resume_session(sid, workspace_path: File.join(@dir, "."))
+    assert verified.session.approval_policy.project_grants.granted?("bash")
+    assert_equal %w[once session project], verified.allowed_approval_scopes
+    assert_equal File.realpath(@dir), bash_workdir(verified)
+
+    # The persisted identity stays a hash — no raw path leaked into
+    # session metadata through the SQLite JSON round-trip.
+    metadata = manager4.store.metadata(sid)
+    assert metadata[:workspaceId].start_with?("workspace:")
+    refute_includes metadata.values.map(&:to_s).join(" "), @dir
+    refute_includes metadata.values.map(&:to_s).join(" "), File.realpath(@dir)
+
+    [state2, state3, state4].each(&:close)
+  end
+
   # ── Server restart ─────────────────────────────────────────────────────
 
   def test_server_restart_resume_replay_and_continue
@@ -298,6 +343,13 @@ class SessionRestartResumeTest < Minitest::Test
 
   def rpc(id, method, params)
     { "jsonrpc" => "2.0", "id" => id, "method" => method, "params" => params }
+  end
+
+  # The pinned workdir of the session's bash tool (nil when the resume
+  # did not verify workspace context).
+  def bash_workdir(adapter)
+    bash = adapter.session.tools.find { |tool| tool.is_a?(Ask::Tools::Bash) }
+    bash&.default_workdir
   end
 
   def output_lines(io)

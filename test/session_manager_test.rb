@@ -39,19 +39,74 @@ class SessionManagerTest < Minitest::Test
     refute_empty metadata[:workspaceId]
   end
 
-  def test_project_grants_restore_after_manager_restart
+  def test_project_grants_restore_after_manager_restart_with_matching_workspace
     state = Ask::State::Memory.new
-    manager = Ask::AppServer::SessionManager.new(state_adapter: state)
-    session_id = manager.create_session(workspace_path: "/tmp", model: "gpt-4o")
-    adapter = manager.get(session_id)
-    adapter.session.approval_policy.project_grants.grant("bash")
-    manager.host.append(session_id, type: "agent.snapshot", payload: { messages: [], turn_count: 0 })
+    manager, session_id = seed_workspace_session(state)
+    manager.get(session_id).session.approval_policy.project_grants.grant("bash")
+
+    restarted = Ask::AppServer::SessionManager.new(state_adapter: state)
+    resumed = restarted.resume_session(session_id, workspace_path: "/tmp/.")
+
+    assert resumed.session.approval_policy.project_grants.granted?("bash")
+    assert_equal %w[once session project], resumed.allowed_approval_scopes
+    bash = resumed.session.tools.find { |tool| tool.is_a?(Ask::Tools::Bash) }
+    assert_equal File.realpath("/tmp"), bash.default_workdir,
+                 "verified resume pins tools to the canonical workspace, not the host cwd"
+  end
+
+  def test_resume_without_workspace_context_fails_closed_to_session_scope
+    state = Ask::State::Memory.new
+    manager, session_id = seed_workspace_session(state)
+    manager.get(session_id).session.approval_policy.project_grants.grant("bash")
 
     restarted = Ask::AppServer::SessionManager.new(state_adapter: state)
     resumed = restarted.resume_session(session_id)
 
-    assert resumed.session.approval_policy.project_grants.granted?("bash")
-    assert_equal %w[once session project], resumed.allowed_approval_scopes
+    assert_nil resumed.session.approval_policy.project_grants,
+                "unverified resume must not attach the stored project grants"
+    assert_equal %w[once session], resumed.allowed_approval_scopes
+    bash = resumed.session.tools.find { |tool| tool.is_a?(Ask::Tools::Bash) }
+    assert_nil bash.default_workdir, "unverified resume leaves tools unpinned"
+
+    assert_raises(Ask::AppServer::InvalidRequest) do
+      resumed.approve_interaction("act_1", scope: :project)
+    end
+  end
+
+  def test_resume_with_mismatched_workspace_context_fails_closed
+    state = Ask::State::Memory.new
+    manager, session_id = seed_workspace_session(state)
+    manager.get(session_id).session.approval_policy.project_grants.grant("bash")
+
+    restarted = Ask::AppServer::SessionManager.new(state_adapter: state)
+    resumed = restarted.resume_session(session_id, workspace_path: "/var/ask-app-server-other-project")
+
+    assert_nil resumed.session.approval_policy.project_grants,
+                "a path for another project must not restore this project's grants"
+    assert_equal %w[once session], resumed.allowed_approval_scopes
+    bash = resumed.session.tools.find { |tool| tool.is_a?(Ask::Tools::Bash) }
+    assert_nil bash.default_workdir
+  end
+
+  def test_resume_metadata_keeps_only_the_hashed_workspace_identity
+    require "tmpdir"
+
+    Dir.mktmpdir("ask-app-server-workspace") do |dir|
+      state = Ask::State::Memory.new
+      manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+      session_id = manager.create_session(workspace_path: dir, model: "gpt-4o")
+      manager.host.append(session_id, type: "agent.snapshot", payload: { messages: [], turn_count: 0 })
+
+      restarted = Ask::AppServer::SessionManager.new(state_adapter: state)
+      restarted.resume_session(session_id, workspace_path: File.join(dir, "."))
+
+      metadata = restarted.store.metadata(session_id)
+      assert metadata[:workspaceId].start_with?("workspace:"),
+             "workspaceId stays a hashed identity"
+      persisted = metadata.values.map(&:to_s).join(" ")
+      refute_includes persisted, dir, "raw workspace paths must not be persisted"
+      refute_includes persisted, File.realpath(dir)
+    end
   end
 
   def test_create_session_with_defaults
@@ -239,5 +294,16 @@ class SessionManagerTest < Minitest::Test
 
     assert @manager.close_session(session_id)
     assert_nil @manager.get(session_id)
+  end
+
+  private
+
+  # Create a workspace-scoped session with a durable snapshot so a
+  # restarted manager can take the durable resume path.
+  def seed_workspace_session(state, workspace_path: "/tmp")
+    manager = Ask::AppServer::SessionManager.new(state_adapter: state)
+    session_id = manager.create_session(workspace_path: workspace_path, model: "gpt-4o")
+    manager.host.append(session_id, type: "agent.snapshot", payload: { messages: [], turn_count: 0 })
+    [manager, session_id]
   end
 end

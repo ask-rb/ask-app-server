@@ -121,11 +121,25 @@ module Ask
       # restarts: the rebuilt adapter uses this manager's configured
       # defaults.
       #
+      # Workspace context fails closed. The stored +workspaceId+ is a
+      # hash of the canonical workspace path, never the path itself, so
+      # the caller must prove the context by supplying +workspace_path+:
+      # project grants are attached (and `project` advertised as an
+      # approval scope, and tools pinned to the workspace via
+      # default_workdir) only when the supplied path canonicalizes to
+      # that stored identity. Absent or mismatched context resumes the
+      # session with no project scope — grants never reach tools that
+      # would run from an unverified working directory. The stored
+      # identity itself is preserved either way (still a hash), so a
+      # later verified resume can restore it.
+      #
+      # @param session_id [String]
+      # @param workspace_path [String, nil] the caller's workspace context
       # @return [AgentAdapter]
       # @raise [SessionNotFound] when neither the live registry nor the
       #   durable Host knows the session, or its durable record is
       #   terminal (closed/aborted)
-      def resume_session(session_id)
+      def resume_session(session_id, workspace_path: nil)
         adapter = @store.get(session_id)
         return adapter if adapter
 
@@ -137,7 +151,8 @@ module Ask
 
         stored_metadata = @store.metadata(session_id) || {}
         workspace_id = stored_metadata[:workspaceId] || stored_metadata["workspaceId"]
-        workspace_path = nil
+        workspace_path = verified_resume_workspace(workspace_id, workspace_path)
+        project_grants = project_grants_for(workspace_id) if workspace_path
         approval_opts, plan_mode = resolve_approval(nil)
         adapter = AgentAdapter.new(
           model: resolve_agent_model(nil),
@@ -146,7 +161,7 @@ module Ask
           agent_dir: workspace_path,
           approval: approval_opts[:mode],
           require_approval: approval_opts[:require_approval],
-          project_grants: project_grants_for(workspace_id),
+          project_grants: project_grants,
           plan_mode: plan_mode,
           host: @host,
           created_at: record.created_at
@@ -378,6 +393,20 @@ module Ask
         @host.session(session_id)
       rescue Ask::Session::NotFoundError
         nil
+      end
+
+      # Fail-closed workspace verification for durable resume: the
+      # canonical path when the caller's +path+ hashes to the stored
+      # +workspaceId+, nil otherwise (no path supplied, or a path for a
+      # different project). Never falls back to a stored raw path —
+      # there is none: only the hash is persisted.
+      def verified_resume_workspace(workspace_id, path)
+        return nil if workspace_id.nil? || path.nil?
+
+        canonical = canonical_workspace_path(path)
+        return nil unless canonical && workspace_identity(canonical) == workspace_id
+
+        canonical
       end
 
       # Resolve the configured model for a new agent session: parse an
