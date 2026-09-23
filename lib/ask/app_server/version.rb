@@ -2,6 +2,6 @@
 
 module Ask
   module AppServer
-    VERSION = "0.4.29"
+    VERSION = "0.4.30"
   end
 end
