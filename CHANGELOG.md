@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `Ask::AppServer::PermissionHandler` now delegates decisions to the shared
+  `ask-permissions` policy (`PermissionRules` + `ApprovalQueue` +
+  `ApprovalPolicy`). Blocked tools are encoded as `ask` rules, approvals
+  flow through the shared queue (protocol request ids are the queue action
+  ids), and timeout/cancel fail closed via queue reject. The blocking
+  protocol API (`before_tool_call`, `handle_response`, `cancel_all!`,
+  `pending_count`/`pending?`, `on_request`, synchronous condition wait)
+  is unchanged.
+
 ## [0.4.30] - 2026-09-23
 
 ### Changed

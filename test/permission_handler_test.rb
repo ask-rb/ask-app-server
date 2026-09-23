@@ -226,6 +226,125 @@ class PermissionHandlerTest < Minitest::Test
     results.each { |r| assert_equal :proceed, r[:action] }
   end
 
+  # --- shared-policy unification (ask-permissions) ---
+
+  def test_delegates_decision_to_shared_policy
+    handler = Ask::AppServer::PermissionHandler.new
+    assert_respond_to handler, :queue
+    assert_respond_to handler, :rules
+    assert_respond_to handler, :policy
+    assert_kind_of Ask::Permissions::ApprovalQueue, handler.queue
+    assert_kind_of Ask::Permissions::PermissionRules, handler.rules
+    assert_kind_of Ask::Permissions::ApprovalPolicy, handler.policy
+  end
+
+  def test_blocked_tools_encoded_in_shared_rules
+    handler = Ask::AppServer::PermissionHandler.new(blocked_tools: %w[rm destroy])
+    assert handler.rules.ask?("rm"), "custom blocked tool should be ask in shared rules"
+    assert handler.rules.ask?("destroy")
+    refute handler.rules.ask?("read"), "non-blocked tool should not be ask in shared rules"
+  end
+
+  def test_default_blocked_tools_encoded_in_shared_rules
+    handler = Ask::AppServer::PermissionHandler.new
+    %w[write edit bash destroy].each do |tool|
+      assert handler.rules.ask?(tool), "#{tool} should be ask in shared rules by default"
+    end
+    refute handler.rules.ask?("read")
+  end
+
+  def test_pending_action_uses_shared_queue_fields
+    handler = Ask::AppServer::PermissionHandler.new
+    sent = []
+    handler.on_request { |*args| sent << args }
+    tool_call = make_tool_call("write")
+
+    thread = Thread.new { handler.before_tool_call(tool_call) }
+    wait_for_pending(handler, 1)
+
+    assert_equal 1, sent.length
+    request_id, tool_name, sent_args = sent[0]
+    assert_kind_of String, request_id
+    refute_empty request_id
+    assert_equal "write", tool_name
+    assert_equal tool_call.arguments, sent_args
+
+    action = handler.queue[request_id.to_i]
+    refute_nil action, "queue should hold the pending action"
+    assert_equal request_id, action.id.to_s
+    assert_equal "write", action.tool_name.to_s
+    assert_equal tool_call.id, action.tool_call_id
+    assert_equal tool_call.arguments, action.args
+    assert action.pending?, "shared action should be pending"
+    refute action.approved?
+    refute action.rejected?
+
+    handler.handle_response(request_id, "approve")
+    result = thread.value
+    assert_equal :proceed, result[:action]
+    assert handler.queue[request_id.to_i].approved?, "queue action should be approved after approve"
+  end
+
+  def test_reject_marks_shared_action_rejected
+    handler = Ask::AppServer::PermissionHandler.new
+    sent = []
+    handler.on_request { |*args| sent << args }
+
+    thread = Thread.new { handler.before_tool_call(make_tool_call("bash")) }
+    wait_for_pending(handler, 1)
+
+    request_id = sent[0][0]
+    handler.handle_response(request_id, "deny")
+    result = thread.value
+
+    assert_equal :block, result[:action]
+    assert handler.queue[request_id.to_i].rejected?
+  end
+
+  def test_never_mode_does_not_enqueue_shared_action
+    handler = Ask::AppServer::PermissionHandler.new(mode: :never)
+    sent = []
+    handler.on_request { |*args| sent << args }
+
+    result = handler.before_tool_call(make_tool_call("write"))
+
+    assert_equal :proceed, result[:action]
+    assert_empty sent
+    assert_equal 0, handler.pending_count
+    assert_empty handler.queue.pending_actions
+  end
+
+  def test_timeout_fail_closed_rejects_shared_action
+    handler = Ask::AppServer::PermissionHandler.new(timeout: 0.1)
+    sent = []
+    handler.on_request { |*args| sent << args }
+
+    result = handler.before_tool_call(make_tool_call("write"))
+
+    assert_equal :block, result[:action]
+    assert_includes result[:reason].to_s, "timed out"
+    assert_equal 0, handler.pending_count
+    assert_empty handler.queue.pending_actions
+    refute_nil sent[0], "request callback should still fire before timeout"
+  end
+
+  def test_cancel_all_clears_shared_queue
+    handler = Ask::AppServer::PermissionHandler.new
+    handler.on_request { |*| }
+
+    threads = 2.times.map do
+      Thread.new { handler.before_tool_call(make_tool_call("write")) }
+    end
+    wait_for_pending(handler, 2)
+
+    handler.cancel_all!
+    results = threads.map(&:value)
+
+    assert_equal 0, handler.pending_count
+    assert_empty handler.queue.pending_actions
+    results.each { |r| assert_equal :block, r[:action] }
+  end
+
   private
 
   def wait_for_pending(handler, expected, timeout: 5)
